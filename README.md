@@ -1,12 +1,13 @@
 # NetworkingKit
 
-Переиспользуемый Swift Package для сетевого слоя iOS-приложений.
-Транспорт-агностичные абстракции в `NetworkingCore` + сменные реализации (`Alamofire` / `URLSession`) + WebSocket-клиент + утилиты для тестов.
+A reusable Swift package for the networking layer of iOS apps. `NetworkingCore` holds transport-agnostic abstractions; `NetworkingAlamofire` and `NetworkingURLSession` are interchangeable transports; `NetworkingWebSocket` is a generic WebSocket client; `NetworkingTesting` provides test doubles.
+
+> **Status: prototype.** The design is stable and the test suite passes, but several defects in auth refresh, pinning, downloads and WebSocket reconnect make it unsuitable for production as-is. See [Status & known issues](#status--known-issues).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Application (HorseCare, etc.)                               │
-│   Domain  ──▶  Services  ──▶  APIClientProtocol             │  ← зависит ТОЛЬКО от NetworkingCore
+│ Application (e.g. HorseCare)                                │
+│   Domain  ──▶  Services  ──▶  APIClientProtocol             │  ← depends on NetworkingCore only
 └──────────────────────┬──────────────────────────────────────┘
                        │
         ┌──────────────┴──────────────┬──────────────────┐
@@ -16,44 +17,40 @@
         └──────────────┬──────────────┘
                        ▼
                 NetworkingCore
-        (Endpoint, RequestBody, APIClientProtocol,
-         Interceptors, RetryConfig, PinningPolicy,
+        (APIEndpoint, RequestBody, APIClientProtocol,
+         interceptors, RetryConfiguration, PinningPolicy,
          TokenStore, NetworkLogger, NetworkConfiguration)
 ```
 
----
-
-## Статус
-
-- ✅ **Фаза 1** — Core skeleton (типы, протоколы, дефолтные интерсепторы)
-- ✅ **Фаза 2** — `NetworkingURLSession` (полная реализация без сторонних зависимостей)
-- ✅ **Фаза 3** — `NetworkingAlamofire` (адаптер поверх Alamofire 5.11+)
-- ✅ **Фаза 4** — `NetworkingWebSocket` (generic WS-клиент с heartbeat и reconnect-with-jitter)
-- ✅ **Фаза 5** — `NetworkingTesting` (`MockAPIClient`, `StubResponse`, `RecordingInterceptor`, `MockTokenStore`)
-- ✅ **Фаза 6** — Тесты (34/34 green)
-- ✅ **Фаза 7** — Документация и пример HorseCare-style
-
-## Параметры
+## Requirements
 
 - `swift-tools-version: 6.0`
 - iOS 17 / macOS 14 / tvOS 17 / watchOS 10 / visionOS 1
-- Strict Concurrency `.v6` для всех таргетов кроме `NetworkingAlamofire` (`.v5` — ждём завершения Sendable-миграции AF)
+- Swift 6 language mode for every target except `NetworkingAlamofire`, which builds in Swift 5 mode and bridges Alamofire callbacks through `@unchecked Sendable` boxes.
+- Alamofire `from: "5.11.0"` (resolved: 5.11.2).
 
-## Таргеты
+## Products
 
-| Library | Зависимости | Назначение |
+| Library | Depends on | Purpose |
 |---|---|---|
-| `NetworkingCore` | — | Абстракции, конфиг, дефолтные интерсепторы |
-| `NetworkingAlamofire` | `Core`, `Alamofire 5.11+` | Production-транспорт |
-| `NetworkingURLSession` | `Core` | Альтернативный транспорт без сторонних зависимостей |
-| `NetworkingWebSocket` | `Core` | Generic WS-клиент с heartbeat и reconnect |
-| `NetworkingTesting` | `Core` | `MockAPIClient`, `StubResponse`, `RecordingInterceptor`, `MockTokenStore` |
+| `NetworkingCore` | — | Endpoint/body model, `APIClientProtocol`, configuration, default interceptors, errors |
+| `NetworkingAlamofire` | Core, Alamofire | `AlamofireAPIClient` transport |
+| `NetworkingURLSession` | Core | `URLSessionAPIClient` transport with no third-party dependencies |
+| `NetworkingWebSocket` | Core | `WebSocketClient<Message>` with heartbeat and reconnect policy |
+| `NetworkingTesting` | Core | `MockAPIClient`, `StubResponse`, `RecordingInterceptor`, `MockTokenStore` |
 
----
+## Building and testing
 
-## Подключение через SPM
+```sh
+swift build
+swift test
+```
 
-В `Package.swift` потребителя:
+The suite contains 34 XCTest cases (Core 20, URLSession 6, WebSocket 5, Alamofire 3). All 34 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
+
+## Adding the package
+
+In the consumer's `Package.swift`:
 
 ```swift
 dependencies: [
@@ -62,9 +59,7 @@ dependencies: [
 targets: [
     .target(
         name: "Domain",
-        dependencies: [
-            .product(name: "NetworkingCore", package: "NetworkingKit"),
-        ]
+        dependencies: [.product(name: "NetworkingCore", package: "NetworkingKit")]
     ),
     .target(
         name: "App",
@@ -84,19 +79,20 @@ targets: [
 ]
 ```
 
-В Xcode SPM-проекте — `File → Add Package Dependencies…`, выбрать нужные library-продукты в нужные таргеты.
+The package is not published; the URL above is a placeholder. In Xcode, use **File → Add Package Dependencies…** and attach each library product to the target that needs it.
 
----
+## Usage
 
-## Минимальный пример
+The examples below use the real public API of this package. Types such as `Horse`, `Page`, `HorseCreateRequest`, `UploadResponse`, `KeychainTokenStore` and `loadPinnedKeyCertificates()` belong to the consuming app.
 
-### 1. Эндпоинты
+### Endpoints
+
+Each request is a type conforming to `APIEndpoint`. Only `path` and `method` are required; `query`, `headers`, `body` and `timeout` have defaults.
 
 ```swift
 import NetworkingCore
 
 enum HorsesEndpoints {
-
     struct List: APIEndpoint {
         let page: Int
         let pageSize: Int
@@ -115,13 +111,12 @@ enum HorsesEndpoints {
     }
 
     struct Create: APIEndpoint {
-        let body: HorseCreateRequest
+        let payload: HorseCreateRequest   // must be Encodable & Sendable
         let idempotencyKey: String
         var path: String { "horses" }
         var method: HTTPMethod { .post }
         var headers: HTTPHeaders? { ["Idempotency-Key": idempotencyKey] }
-        var bodyContent: RequestBody { .json(body) }
-        var body: RequestBody { bodyContent }
+        var body: RequestBody { .json(payload) }
     }
 
     struct UploadAvatar: APIEndpoint {
@@ -129,32 +124,24 @@ enum HorsesEndpoints {
         let imageData: Data
         var path: String { "horses/\(id)/avatar" }
         var method: HTTPMethod { .post }
-        var bodyContent: RequestBody {
-            .multipart([.data(imageData,
-                              name: "avatar",
-                              filename: "avatar.jpg",
-                              mimeType: "image/jpeg")])
+        var body: RequestBody {
+            .multipart([.data(imageData, name: "avatar",
+                              filename: "avatar.jpg", mimeType: "image/jpeg")])
         }
-        var body: RequestBody { bodyContent }
     }
 }
 ```
 
-### 2. Сервис
+`path` is appended with `URL.appendingPathComponent`, so it must not contain a query string; use `query` instead.
+
+`NetworkingCore.HTTPHeaders` has the same name as `Alamofire.HTTPHeaders`. In a file that imports both modules, qualify it as `NetworkingCore.HTTPHeaders`.
+
+### Service
 
 ```swift
 import NetworkingCore
 
-protocol HorsesServiceProtocol: Sendable {
-    func list(page: Int, pageSize: Int) async throws -> Page<Horse>
-    func get(id: Int) async throws -> Horse
-    func create(_ body: HorseCreateRequest) async throws -> Horse
-    func uploadAvatar(horseId: Int,
-                      imageData: Data,
-                      progress: ProgressHandler?) async throws -> URL
-}
-
-final class HorsesService: HorsesServiceProtocol {
+final class HorsesService: Sendable {
     private let client: any APIClientProtocol
     init(client: any APIClientProtocol) { self.client = client }
 
@@ -163,128 +150,116 @@ final class HorsesService: HorsesServiceProtocol {
                               as: Page<Horse>.self)
     }
 
-    func get(id: Int) async throws -> Horse {
-        try await client.send(HorsesEndpoints.Get(id: id), as: Horse.self)
+    func create(_ payload: HorseCreateRequest) async throws -> Horse {
+        try await client.send(HorsesEndpoints.Create(payload: payload,
+                                                     idempotencyKey: UUID().uuidString),
+                              as: Horse.self)
     }
 
-    func create(_ body: HorseCreateRequest) async throws -> Horse {
-        try await client.send(
-            HorsesEndpoints.Create(body: body, idempotencyKey: UUID().uuidString),
-            as: Horse.self
-        )
-    }
-
-    func uploadAvatar(horseId: Int,
-                      imageData: Data,
-                      progress: ProgressHandler?) async throws -> URL {
-        let response = try await client.upload(
-            HorsesEndpoints.UploadAvatar(id: horseId, imageData: imageData),
-            as: UploadResponse.self,
-            progress: progress
-        )
-        return response.url
+    func uploadAvatar(horseId: Int, imageData: Data,
+                      progress: ProgressHandler?) async throws -> UploadResponse {
+        try await client.upload(HorsesEndpoints.UploadAvatar(id: horseId, imageData: imageData),
+                                as: UploadResponse.self,
+                                progress: progress)
     }
 }
 ```
 
-### 3. Composition root
+### Composition root
 
 ```swift
 import NetworkingCore
 import NetworkingAlamofire
 
+let tokenStore = KeychainTokenStore()   // app-defined, conforms to TokenStore
+
+// A separate client without refreshAction, used only for the refresh call.
+let authClient: any APIClientProtocol = AlamofireAPIClient(
+    configuration: NetworkConfiguration(baseURL: URL(string: "https://api.horsecare.app/v1")!)
+)
+
 let configuration = NetworkConfiguration(
     baseURL: URL(string: "https://api.horsecare.app/v1")!,
     globalHeaders: [
         "X-App-Platform": "ios",
-        "X-App-Build": Bundle.main.shortVersion
+        "X-App-Build": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown",
     ],
     dynamicHeaders: {
         ["X-Locale": Locale.current.identifier,
          "X-Timezone": TimeZone.current.identifier]
     },
-    pinning: [
-        "api.horsecare.app": .publicKeys(loadPinnedKeys())
-    ],
+    pinning: ["api.horsecare.app": .publicKeys(loadPinnedKeyCertificates())],
     retry: RetryConfiguration(limit: 3, baseDelay: 0.5, maxDelay: 30),
-    tokenStore: KeychainTokenStore(),
+    tokenStore: tokenStore,
     refreshAction: { current in
-        try await refreshOAuth(refreshToken: current.refreshToken)
+        try await authClient.send(RefreshEndpoint(refreshToken: current.refreshToken),
+                                  as: AuthTokens.self)
     },
     logger: ConsoleNetworkLogger()
 )
 
 let client: any APIClientProtocol = AlamofireAPIClient(configuration: configuration)
+// or: URLSessionAPIClient(configuration: configuration)
 let horses = HorsesService(client: client)
 ```
 
----
+Do not perform the refresh call through the same client that owns the `AuthInterceptor`. That interceptor would attach the expired bearer token to the refresh request, and a 401 on the refresh request would wait on its own in-flight refresh task.
 
-## Три уровня заголовков
+`AuthTokens` is decoded with the configured decoder, which uses `.convertFromSnakeCase`, so a response with `access_token`, `refresh_token` and `expires_at` maps onto it directly.
 
-| Уровень | Где задаётся | Когда применять |
+## Headers
+
+| Level | Where it is set | Typical use |
 |---|---|---|
-| **1. Session (глобальные)** | `NetworkConfiguration.globalHeaders` | Не меняется в рантайме: `X-App-Platform`, `X-App-Build`, `User-Agent` |
-| **2. Interceptor (динамические)** | `NetworkConfiguration.dynamicHeaders` или кастомный `RequestInterceptor` | Меняется без рестарта: `X-Locale`, `X-Timezone`, `X-Device-ID`, `Authorization` |
-| **3. Endpoint (per-request)** | `var headers: HTTPHeaders?` в эндпоинте | Конкретный запрос: `If-None-Match`, `Idempotency-Key`, локальный `Accept-Language` override |
+| Global | `NetworkConfiguration.globalHeaders` | Values fixed for the app session: `X-App-Platform`, `X-App-Build`, `User-Agent` |
+| Dynamic | `NetworkConfiguration.dynamicHeaders`, or a custom `RequestInterceptor` in `additionalInterceptors` | Values read per request: `X-Locale`, `X-Timezone`, `X-Device-ID` |
+| Endpoint | `var headers: HTTPHeaders?` on the endpoint | Request-specific values: `If-None-Match`, `Idempotency-Key` |
 
-**Приоритет:** Endpoint > Dynamic > Global. `HeadersInterceptor` ставит global+dynamic только если поле не задано на уровне эндпоинта.
+Precedence is endpoint > dynamic > global: `HeadersInterceptor` sets a global or dynamic header only when the request does not already have that field. `Authorization` is set by `AuthInterceptor`, which overwrites any existing value.
 
----
+## Interceptors, auth and retry
 
-## Auth + Retry + Pinning
+Both transports build the same chain from `NetworkConfiguration`: `HeadersInterceptor`, then `AuthInterceptor` (only when `refreshAction` is set), then `additionalInterceptors`, then `RetryInterceptor`. The URLSession transport also inserts `LoggingInterceptor` when a logger is configured; the Alamofire transport logs through an internal `EventMonitor` instead. `CompositeInterceptor` runs `adapt` sequentially, and for `retry` the first decision other than `.doNotRetry` wins.
 
-### OAuth refresh-on-401
+**Refresh on 401.** `AuthInterceptor` adds `Authorization: Bearer <accessToken>` from the `TokenStore`. On a 401 it calls `refreshAction` once, saves the new tokens and retries the request. It only does this on the first attempt of a request, and concurrent refreshes are not reliably deduplicated (see known issues).
 
-`AuthInterceptor` встроен в Core; включается, если в конфиге передан `refreshAction`. Дедупликация параллельных 401-refresh-вызовов решена через actor-state.
-
-```swift
-NetworkConfiguration(
-    ...
-    tokenStore: KeychainTokenStore(),
-    refreshAction: { current in
-        let response = try await session.send(
-            RefreshEndpoint(refreshToken: current.refreshToken),
-            as: AuthTokens.self
-        )
-        return response
-    }
-)
-```
-
-### Retry с exponential backoff + jitter
+**Retry with backoff.**
 
 ```swift
 RetryConfiguration(
-    limit: 3,
+    limit: 3,                               // total attempts, including the first
     baseDelay: 0.5,
     maxDelay: 30,
-    jitter: 0.8...1.2,                     // защита от thundering herd
+    jitter: 0.8...1.2,
     retryableMethods: [.get, .head, .put, .delete],
     retryableStatusCodes: [408, 425, 429, 500, 502, 503, 504]
 )
 ```
 
-### SSL Pinning
+Requests with no response (transport errors) and responses with a retryable status are retried for idempotent methods. The delay is `min(maxDelay, baseDelay * 2^(attempt-1))` multiplied by the jitter factor, so it can exceed `maxDelay` by up to the upper jitter bound. The `Retry-After` header is not read.
+
+## SSL pinning
 
 ```swift
 NetworkConfiguration(
-    ...
+    baseURL: baseURL,
     pinning: [
-        "api.horsecare.app": .publicKeys([cert1DER, cert2DER]),
-        "stream.horsecare.app": .certificates([streamCertDER])
+        "api.horsecare.app": .publicKeys([leafCertDER, backupCertDER]),
+        "cdn.horsecare.app": .certificates([cdnCertDER]),
     ]
 )
 ```
 
-`NetworkingAlamofire` использует `ServerTrustManager` + `PinnedCertificatesTrustEvaluator/PublicKeysTrustEvaluator`.
-`NetworkingURLSession` — `URLSessionDelegate.didReceive(challenge:)` с `SecCertificateCopyKey`.
+`PinningPolicy` takes DER-encoded certificates for both modes; `.publicKeys` extracts the keys from them.
 
----
+- `NetworkingAlamofire` maps the policies onto `ServerTrustManager` with `PinnedCertificatesTrustEvaluator` / `PublicKeysTrustEvaluator`. Alamofire's evaluators also perform default system validation.
+- `NetworkingURLSession` uses an internal `URLSessionDelegate` that compares certificates or keys from the presented chain.
+
+Pinning applies to the HTTP clients only. `WebSocketConfiguration` has no pinning option. Both implementations have behavioral gaps listed under known issues.
 
 ## Multipart upload
 
-`RequestBody.multipart([MultipartPart])` — каждый `MultipartPart` имеет `.data(Data)` или `.fileURL(URL)` (стрим с диска для больших файлов).
+`RequestBody.multipart([MultipartPart])`. Build parts with `.data(_:name:filename:mimeType:)` or `.file(_:name:filename:mimeType:)`; the latter streams from disk.
 
 ```swift
 struct UploadDataFile: APIEndpoint {
@@ -292,58 +267,58 @@ struct UploadDataFile: APIEndpoint {
     let horseId: Int
     var path: String { "files" }
     var method: HTTPMethod { .post }
-    var bodyContent: RequestBody {
+    var body: RequestBody {
         .multipart([
             .file(fileURL, name: "file"),
-            .data(Data("\(horseId)".utf8), name: "horse_id")
+            .data(Data("\(horseId)".utf8), name: "horse_id"),
         ])
     }
-    var body: RequestBody { bodyContent }
 }
 
 let result = try await client.upload(
     UploadDataFile(fileURL: localFile, horseId: 42),
     as: UploadResponse.self,
-    progress: { fraction in print("⬆︎ \(Int(fraction * 100))%") }
+    progress: { fraction in print("upload \(Int(fraction * 100))%") }
 )
 ```
 
-В `NetworkingURLSession` body пишется во временный файл и грузится через `session.upload(for:fromFile:)` — нет out-of-memory на больших файлах. В `NetworkingAlamofire` — `MultipartFormData.append(URL,...)`.
+The URLSession transport writes the body to a temporary file and uploads it with `URLSession.upload(for:fromFile:delegate:)`. The Alamofire transport uses `MultipartFormData`.
 
----
-
-## Streamed download
+## Download
 
 ```swift
 let savedURL = try await client.download(
     DownloadFile(fileId: file.id),
-    to: .documents(subpath: "downloads/\(file.filename)"),
-    progress: { fraction in print("⬇︎ \(Int(fraction * 100))%") }
+    to: .fileURL(downloadsDirectory.appendingPathComponent("\(file.id).bin")),
+    progress: { fraction in print("download \(Int(fraction * 100))%") }
 )
 ```
 
-`DownloadDestination` имеет три варианта: `.fileURL(URL, removeIfExists)`, `.documents(subpath:)`, `.temporary(filename:)`.
+`DownloadDestination` has three cases: `.fileURL(URL, removeIfExists: Bool = true)`, `.documents(subpath:)` and `.temporary(filename:)`. Only `.fileURL` removes an existing file before writing. Do not build a destination path from a server-provided filename without sanitizing it.
 
----
-
-## WebSocket — real-time с auto-reconnect
+## WebSocket
 
 ```swift
 import NetworkingWebSocket
 
-struct SensorReading: Codable, Sendable {
+struct SensorReading: Decodable, Sendable {
     let sensorId: String
     let heartRate: Int
     let temperature: Double
     let timestamp: Date
 }
 
+struct SubscribeCommand: Encodable, Sendable {
+    let action: String
+    let horseId: Int
+}
+
 let ws = WebSocketClient<SensorReading>(
     configuration: WebSocketConfiguration(
         url: URL(string: "wss://stream.horsecare.app/v1/sensors")!,
         pingInterval: 30,
-        reconnect: .exponential(baseDelay: 1, maxDelay: 30, maxAttempts: .max),
-        tokenStore: appKeychain
+        reconnect: .exponential(baseDelay: 1, maxDelay: 30, maxAttempts: 10),
+        tokenStore: tokenStore
     )
 )
 
@@ -351,31 +326,29 @@ Task {
     for await event in await ws.events() {
         switch event {
         case .connected:
-            try? await ws.send(SubscribeCmd(action: "subscribe", horseId: 42))
+            try? await ws.send(SubscribeCommand(action: "subscribe", horseId: 42))
         case .message(let reading):
-            print("❤︎ \(reading.heartRate) bpm  🌡 \(reading.temperature)°C")
+            print("\(reading.heartRate) bpm, \(reading.temperature) °C")
         case .raw(let data):
-            print("• \(data.count) bytes")
+            print("undecodable frame, \(data.count) bytes")
         case .disconnected(reason: .reconnecting(let attempt, let delay)):
-            print("🔌 reconnect attempt \(attempt) in \(delay)s")
+            print("reconnect attempt \(attempt) in \(delay)s")
         case .disconnected(reason: .givenUp):
-            print("✗ given up")
+            print("gave up")
         case .disconnected(reason: .clientInitiated):
-            print("🔌 closed")
-        case .disconnected(reason: .closedByPeer(let code, _)):
-            print("🔌 peer closed: \(code)")
-        case .disconnected(reason: .error(let err)):
-            print("✗ \(err)")
+            print("closed")
+        case .disconnected(reason: .closedByPeer):
+            break   // declared but never emitted by the current implementation
+        case .disconnected(reason: .error(let error)):
+            print("error: \(error)")
         }
     }
 }
 ```
 
----
+Frames that decode as `Message` arrive as `.message`; everything else arrives as `.raw(Data)`. Call `events()` once per client. Ending the stream (cancelling the consuming task) disconnects the client, and so does `await ws.disconnect()`.
 
-## Тестирование
-
-В тестовом таргете подключи `NetworkingTesting` и используй `MockAPIClient`:
+## Testing with `NetworkingTesting`
 
 ```swift
 import XCTest
@@ -386,79 +359,82 @@ import NetworkingTesting
 final class HorsesServiceTests: XCTestCase {
     func test_list_returnsHorses() async throws {
         let client = MockAPIClient()
-        await client.stub(
-            path: "horses",
-            with: .success(Page<Horse>(items: [.mock(id: 1)],
-                                       total: 1, page: 1, pageSize: 20))
-        )
+        await client.stub(path: "horses",
+                          with: .success(Page<Horse>(items: [.mock(id: 1)],
+                                                     total: 1, page: 1, pageSize: 20)))
 
-        let service = HorsesService(client: client)
-        let page = try await service.list(page: 1, pageSize: 20)
+        let page = try await HorsesService(client: client).list(page: 1, pageSize: 20)
 
-        XCTAssertEqual(page.items.count, 1)
-        XCTAssertEqual(page.items.first?.id, 1)
-
+        XCTAssertEqual(page.items.map(\.id), [1])
         let calls = await client.calls(for: "horses")
-        XCTAssertEqual(calls.count, 1)
-        XCTAssertEqual(calls.first?.method, .get)
+        XCTAssertEqual(calls.map(\.method), [.get])
     }
 
-    func test_create_throwsServerError() async {
+    func test_create_propagatesNotFound() async {
         let client = MockAPIClient()
         await client.stub(path: "horses", with: .failure(.notFound))
-        let service = HorsesService(client: client)
         do {
-            _ = try await service.create(.mock)
-            XCTFail("Expected error")
+            _ = try await HorsesService(client: client).create(.mock)
+            XCTFail("Expected an error")
         } catch APIError.notFound {
-            // ok
         } catch {
-            XCTFail("Unexpected: \(error)")
+            XCTFail("Unexpected error: \(error)")
         }
     }
 }
 ```
 
-Дополнительные утилиты Testing:
-- `MockTokenStore` с counter'ами `saveCount`/`clearCount`
-- `RecordingInterceptor` — фиксирует все adapt/retry-вызовы в actor-state
+Stubs are keyed by the exact `endpoint.path` string ("horses", not "/horses"). Unstubbed paths fail with `.notFound` unless `setDefaultStub(_:)` is called. `StubResponse` also offers `.successData(Data)`, `.void` and `.delayed(seconds, inner)`. `MockTokenStore` counts `save` and `clear` calls, and `RecordingInterceptor` records `adapt` and `retry` calls.
 
----
+## Migrating from Moya
 
-## Миграция с Moya
-
-| HorseCare (Moya) | NetworkingKit |
+| Moya | NetworkingKit |
 |---|---|
-| `TargetType` enum case | отдельный struct, реализующий `APIEndpoint` |
-| `MoyaProvider<API>` | `AlamofireAPIClient(configuration:)` или `URLSessionAPIClient(configuration:)` |
-| `TokenPlugin` | `AuthInterceptor` (встроен, конфиг через `refreshAction`) |
-| `NetworkLoggerPlugin` | `NetworkLogger` protocol + `ConsoleNetworkLogger` (или `EventLoggerAdapter` для Pulse) |
-| `MultipartRequest` proto | `RequestBody.multipart([MultipartPart])` |
-| `BackgroundPlugin` | `NetworkConfiguration.sessionConfiguration = .background(...)` |
-| `ServiceErrorHandler` | единый `APIError` enum с типизированными вариантами |
-| `provider.request(.case)` | `client.send(MyEndpoint(), as: T.self)` |
-| `provider.stubbingEndpointsClosure` | `MockAPIClient.stub(path:with:)` |
+| `TargetType` enum case | A struct conforming to `APIEndpoint` |
+| `MoyaProvider<API>` | `AlamofireAPIClient(configuration:)` or `URLSessionAPIClient(configuration:)` |
+| Token plugin | `AuthInterceptor`, enabled by `NetworkConfiguration.refreshAction` |
+| `NetworkLoggerPlugin` | An app-defined `NetworkLogger` passed as `NetworkConfiguration.logger` (`ConsoleNetworkLogger` for development) |
+| Multipart target | `RequestBody.multipart([MultipartPart])` |
+| Background-transfer plugin | Not supported: Alamofire rejects background session configurations, and `URLSessionAPIClient` uses async APIs that background sessions do not support |
+| Error handler | The `APIError` enum |
+| `provider.request(.case)` | `client.send(Endpoint(), as: T.self)` |
+| Stubbing closures | `MockAPIClient.stub(path:with:)` |
 
-**Пошаговая стратегия миграции (для проекта уровня HorseCare с 13 модулями таргетов и 26 файлами Moya):**
+To plug in a logging tool that ships its own Alamofire `EventMonitor`, use `AlamofireAPIClient(configuration:additionalMonitors:)` or `AlamofireAPIClient(session:configuration:)`. The internal bridge from `NetworkLogger` to `EventMonitor` is not public.
 
-1. **Шаг 0** — добавь NetworkingKit в `Package.swift` приложения, не убирая Moya. Они уживаются параллельно.
-2. **Шаг 1** — оставь `NetworkingService` фасад в HorseCare как есть (UI/ViewModels через него работают). Внутри начни поэтапно подменять `MoyaProvider` на `AlamofireAPIClient` для одного таргета (например, `Common`). Остальные таргеты — продолжают через Moya.
-3. **Шаг 2** — переведи `TokenPlugin` на `AuthInterceptor` через `NetworkConfiguration.refreshAction` — самый чистый выигрыш.
-4. **Шаг 3** — `NetworkLoggerPlugin` → `EventLoggerAdapter(logger: PulseLogger())` для Pulse, или `ConsoleNetworkLogger()` для разработки.
-5. **Шаги 4..N** — мигрируй таргеты по одному. UI/ViewModels не трогаем — фасад защищает.
-6. **Финал** — удали Moya из зависимостей.
+An incremental migration keeps Moya and NetworkingKit side by side behind the app's existing networking facade, moves one module at a time to `APIClientProtocol`, replaces the token and logger plugins with `refreshAction` and `logger`, and removes Moya when no module uses it.
 
----
+## Status & known issues
 
-## Известные ограничения
+The package is a prototype. The issues below were confirmed by reading the code; none is covered by a test yet.
 
-- `NetworkingAlamofire` под `.v5` language mode (Sendable-миграция AF 5.11 не закончена) — нужно `@unchecked Sendable` локально в bridge'ах. На public-API не утекает.
-- `JSONDecoder`/`JSONEncoder` сами по себе non-Sendable — в `NetworkConfiguration` хранятся как `@Sendable () -> JSONDecoder` фабрики.
-- Background sessions поддерживаются через `sessionConfiguration: .background(withIdentifier:)`, но требуют app-delegate hook'а (`handleEventsForBackgroundURLSession`) на стороне приложения.
-- Reachability мониторинг (`NWPathMonitor`) — за рамками пакета (две строки в композиции потребителя).
-- GraphQL — за рамками пакета (используй Apollo iOS 2.x напрямую).
-- DocC catalog отложен до v1.1.
+**Auth**
+- `AuthInterceptor.refreshIfNeeded()` checks `inflight`, then awaits `tokenStore.current()` before assigning `inflight`. Actor reentrancy at that `await` lets two concurrent 401s start two refreshes; with rotating refresh tokens the second one fails.
+- Refresh runs only when `attempt == 1`, and the attempt counter is shared with `RetryInterceptor`. A request that gets 503 and then 401 never refreshes.
 
-## Лицензия
+**URLSession transport**
+- Multipart `upload` and `download` run `adapt` once and never consult `retry`, so 401 refresh and retry do not apply to them.
+- `download` moves the temporary file with `try? moveItem`. If the target exists (always possible for `.documents` and `.temporary`), the move fails silently and the old file is returned.
+- `PinningDelegate` never calls `SecTrustEvaluateWithError`. When a certificate or key matches, expiry, hostname and chain validation are skipped.
+- A pin mismatch cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
 
-MIT (предполагаемая — добавить `LICENSE` файл).
+**Alamofire transport**
+- `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
+- `mapError` always sets `data: nil` in `.server(statusCode:data:message:)`, so the error body is lost. The URLSession transport keeps it.
+
+**Both transports**
+- `.urlEncoded` bodies are built with `URLComponents.percentEncodedQuery`, which leaves `+` unescaped; a value `a+b` reaches the server as `a b`.
+- The `APIClientProtocol` extension declares `download(_:to:progress:)` with the same signature as the requirement and calls itself. A conformer that omits `download` compiles and then recurses forever.
+
+**WebSocket**
+- `connect()` yields `.connected` and resets the attempt counter right after `resume()`, before the handshake completes, so `.connected` can be reported for a socket that never opens.
+- When `handleFailure` runs on the receive-loop task, it cancels that task first, so the following `Task.sleep` returns immediately. Combined with the counter reset, a client facing a down server reconnects in a tight loop and never reaches `.givenUp`.
+- A normal server close is treated as a failure and triggers reconnect; `.closedByPeer` is never emitted.
+- Calling `events()` a second time replaces the continuation without closing the first connection.
+- There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
+
+**Missing**
+- Tests for 401 → refresh through a real transport, concurrent refresh, multipart, download, pinning, cancellation and Alamofire error mapping.
+- `Retry-After` support and proactive refresh (`AuthTokens.isExpired` is unused).
+- Background sessions, reachability (`NWPathMonitor`) and GraphQL are out of scope.
+- No `LICENSE` file and no DocC catalog.
