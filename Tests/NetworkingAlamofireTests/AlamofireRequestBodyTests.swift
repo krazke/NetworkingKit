@@ -144,9 +144,7 @@ final class AlamofireRequestBodyTests: XCTestCase {
         task.cancel()
         let outcome = await task.result(timeout: .seconds(5))
 
-        XCTExpectFailure(KnownIssue.cancellationDuringRetryDelayThrowsLastError) {
-            XCTAssertCancelled(outcome)
-        }
+        XCTAssertCancelled(outcome)
         XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
         XCTAssertEqual(try TemporaryFiles.multipartBodies(), bodiesBefore)
     }

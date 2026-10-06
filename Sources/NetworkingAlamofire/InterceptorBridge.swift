@@ -27,8 +27,16 @@ final class InterceptorBridge: Alamofire.RequestInterceptor {
                for session: Alamofire.Session,
                dueTo error: Error,
                completion: @escaping (RetryResult) -> Void) {
+        // After a cancellation Alamofire finishes the request and its response serializer asks again.
+        // Asking for a retry then would never complete the request: `Session` skips retries of cancelled requests.
+        guard !request.isCancelled else {
+            completion(.doNotRetry)
+            return
+        }
         let core = self.core
         let box = SendableRetryBox(completion)
+        // Alamofire forgets a retried download's file without deleting it, so it is deleted here.
+        let failedDownload = (request as? DownloadRequest)?.fileURL
         let urlRequest = request.request ?? URLRequest(url: URL(string: "about:blank")!)
         let response = request.response
         let attempt = request.retryCount + 1
@@ -43,11 +51,17 @@ final class InterceptorBridge: Alamofire.RequestInterceptor {
             case .doNotRetry:
                 box.value(.doNotRetry)
             case .retry:
+                Self.discard(failedDownload)
                 box.value(.retry)
             case .retryAfter(let delay):
+                Self.discard(failedDownload)
                 box.value(.retryWithDelay(delay))
             }
         }
+    }
+
+    private static func discard(_ download: URL?) {
+        if let download { try? FileManager.default.removeItem(at: download) }
     }
 }
 

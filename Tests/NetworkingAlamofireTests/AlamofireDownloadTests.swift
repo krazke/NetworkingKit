@@ -180,9 +180,7 @@ final class AlamofireDownloadTests: XCTestCase {
         XCTAssertEqual(url, target)
         XCTAssertEqual(try Self.contents(of: target), "new")
         XCTAssertEqual(attempts.value, 2)
-        try XCTExpectFailure(KnownIssue.retriedDownloadsLeak) {
-            XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
-        }
+        XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
     }
 
     func test_retryable503_whenRetriesRunOut_keepsExistingFileAndDiscardsEveryAttempt() async throws {
@@ -201,9 +199,7 @@ final class AlamofireDownloadTests: XCTestCase {
         }
         XCTAssertEqual(StubProtocol.recordedRequests.count, Self.fastRetry.limit)
         XCTAssertEqual(try Self.contents(of: target), "old")
-        try XCTExpectFailure(KnownIssue.retriedDownloadsLeak) {
-            XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
-        }
+        XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
     }
 
     func test_cancellationDuringRetryDelay_throwsCancelled() async throws {
@@ -219,14 +215,9 @@ final class AlamofireDownloadTests: XCTestCase {
         task.cancel()
         let outcome = await task.result(timeout: .seconds(5))
 
-        XCTExpectFailure(KnownIssue.downloadCancelledDuringRetryDelayNeverFinishes) {
-            XCTAssertCancelled(outcome)
-        }
+        XCTAssertCancelled(outcome)
         XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
-        // The unfinished request still owns the 503 attempt's file.
-        try XCTExpectFailure(KnownIssue.downloadCancelledDuringRetryDelayNeverFinishes) {
-            XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
-        }
+        XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
     }
 }

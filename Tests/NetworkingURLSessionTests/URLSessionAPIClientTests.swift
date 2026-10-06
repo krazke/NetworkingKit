@@ -113,6 +113,22 @@ final class URLSessionAPIClientTests: XCTestCase {
         XCTAssertEqual(recorded.count, 1)
         XCTAssertEqual(recorded.first?.url?.path, "/echo")
     }
+
+    func test_cancellationDuringRetryDelay_throwsCancelled() async throws {
+        StubProtocol.reset { _ in .init(statusCode: 503, data: Data(), headers: [:], delay: 0) }
+        let client = makeClient(retry: RetryConfiguration(limit: 3, baseDelay: 30, maxDelay: 30, jitter: 1.0...1.0))
+
+        let task = Task { try await client.send(EchoEndpoint(value: "x"), as: Echo.self) }
+        try await StubProtocol.waitForRequests(1)
+        // Lets the transport receive the 503 and start waiting out the 30-second delay.
+        try await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        let outcome = await task.result(timeout: .seconds(5))
+
+        XCTAssertCancelled(outcome)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+    }
+
 }
 
 final class LockedCounter: @unchecked Sendable {

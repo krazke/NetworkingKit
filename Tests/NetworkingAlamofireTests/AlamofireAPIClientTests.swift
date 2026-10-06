@@ -19,12 +19,13 @@ final class AlamofireAPIClientTests: XCTestCase {
         StubProtocol.reset()
     }
 
-    private func makeClient(globalHeaders: [String: String] = [:]) -> AlamofireAPIClient {
+    private func makeClient(globalHeaders: [String: String] = [:],
+                            retry: RetryConfiguration = .none) -> AlamofireAPIClient {
         let config = NetworkConfiguration(
             baseURL: URL(string: "https://api.test")!,
             sessionConfiguration: .stubbed,
             globalHeaders: globalHeaders,
-            retry: .none
+            retry: retry
         )
         return AlamofireAPIClient(configuration: config)
     }
@@ -62,4 +63,20 @@ final class AlamofireAPIClientTests: XCTestCase {
         let req = StubProtocol.recordedRequests.first
         XCTAssertEqual(req?.value(forHTTPHeaderField: "X-App-Platform"), "ios")
     }
+
+    func test_cancellationDuringRetryDelay_throwsCancelled() async throws {
+        StubProtocol.reset { _ in .init(statusCode: 503, data: Data(), headers: [:], delay: 0) }
+        let client = makeClient(retry: RetryConfiguration(limit: 3, baseDelay: 30, maxDelay: 30, jitter: 1.0...1.0))
+
+        let task = Task { try await client.send(EchoEndpoint(value: "x"), as: Echo.self) }
+        try await StubProtocol.waitForRequests(1)
+        // Lets the transport receive the 503 and start waiting out the 30-second delay.
+        try await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        let outcome = await task.result(timeout: .seconds(5))
+
+        XCTAssertCancelled(outcome)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+    }
+
 }

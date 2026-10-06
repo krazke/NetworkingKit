@@ -128,7 +128,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
             try destination.moveDownloadedFile(at: location, to: target)
             return target
         case .failure(let error):
-            throw mapError(error)
+            throw mapError(error, cancelled: Task.isCancelled)
         }
     }
 
@@ -142,7 +142,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
         case .success(let value):
             return value
         case .failure(let error):
-            throw mapError(error, responseBody: response.data)
+            throw mapError(error, responseBody: response.data, cancelled: Task.isCancelled)
         }
     }
 
@@ -178,7 +178,10 @@ public final class AlamofireAPIClient: APIClientProtocol {
         }
     }
 
-    private func mapError(_ error: any Error, responseBody: Data? = nil) -> APIError {
+    /// - Parameter cancelled: Whether the calling task was cancelled. A request cancelled while it waits for a
+    ///   retry delay fails with the error of its last attempt, which then becomes `.cancelled`.
+    private func mapError(_ error: any Error, responseBody: Data? = nil, cancelled: Bool = false) -> APIError {
+        if cancelled { return .cancelled }
         if let api = error as? APIError { return api }
 
         if let af = error as? AFError {

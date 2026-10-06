@@ -151,9 +151,7 @@ final class AlamofireAuthRefreshTests: XCTestCase {
                        ["Bearer access-0", "Bearer access-1"])
         let refreshCount = await server.refreshCount
         XCTAssertEqual(refreshCount, 1)
-        try XCTExpectFailure(KnownIssue.retriedDownloadsLeak) {
-            XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
-        }
+        XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
     }
 
     func test_rejectedRefresh_throwsUnauthorized() async {

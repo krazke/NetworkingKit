@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 99 XCTest cases (Core 32, URLSession 33, WebSocket 5, Alamofire 29). All 99 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4. Six assertions in the Alamofire tests are wrapped in `XCTExpectFailure` because they reproduce [known issues](#status--known-issues); they are reported as expected failures.
+The suite contains 101 XCTest cases (Core 32, URLSession 34, WebSocket 5, Alamofire 30). All 101 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -221,9 +221,9 @@ Precedence is endpoint > dynamic > global: `HeadersInterceptor` sets a global or
 
 Both transports build the same chain from `NetworkConfiguration`: `HeadersInterceptor`, then `AuthInterceptor` (only when `refreshAction` is set), then `additionalInterceptors`, then `RetryInterceptor`. The URLSession transport also inserts `LoggingInterceptor` when a logger is configured; the Alamofire transport logs through an internal `EventMonitor` instead. `CompositeInterceptor` runs `adapt` sequentially, and for `retry` the first decision other than `.doNotRetry` wins.
 
-Every request kind goes through this chain in both transports: `send`, `sendVoid`, `upload` (multipart or not) and `download`. Each attempt runs `adapt` again, and after a non-2xx response or a transport error `retry` decides whether to send another attempt. Retries reuse the request body: the URLSession transport writes a multipart body to disk once and uploads that file on every attempt. A failed attempt's downloaded file is never placed at the destination (see [Download](#download)).
+Every request kind goes through this chain in both transports: `send`, `sendVoid`, `upload` (multipart or not) and `download`. Each attempt runs `adapt` again, and after a non-2xx response or a transport error `retry` decides whether to send another attempt. Retries reuse the request body: the URLSession transport writes a multipart body to disk once and uploads that file on every attempt. A failed attempt's downloaded file is deleted and never placed at the destination (see [Download](#download)).
 
-Cancelling the calling task ends the request with `APIError.cancelled`, also while it waits for a retry delay. The Alamofire transport does not do this yet; see known issues.
+Cancelling the calling task ends the request with `APIError.cancelled`, also while it waits for a retry delay.
 
 **Refresh on 401.** `AuthInterceptor` adds `Authorization: Bearer <accessToken>` from the `TokenStore`. On a 401 it calls `refreshAction`, saves the new tokens and retries the request with them, whatever the HTTP method, so a POST `upload` is refreshed too. Both transports behave the same way:
 
@@ -323,7 +323,7 @@ let savedURL = try await client.download(
 | A directory exists at the destination | The download fails; the directory is never replaced. |
 | The request fails, including a non-2xx status | The destination is left untouched. |
 
-The file is moved into place only after a 2xx response has been downloaded completely. When the request is retried, the URLSession transport deletes each failed attempt's download; the Alamofire transport currently leaves them in the temporary directory (see known issues). When it cannot be placed, `download` throws `APIError.transport` wrapping a `CocoaError`; an existing file or directory gives `.fileWriteFileExists`. `DownloadDestination.resolve()` keeps its 1.0 behavior and removes an existing file for `.fileURL(_, removeIfExists: true)` immediately; the transports do not call it.
+The file is moved into place only after a 2xx response has been downloaded completely. When the request is retried, each failed attempt's download is deleted. When it cannot be placed, `download` throws `APIError.transport` wrapping a `CocoaError`; an existing file or directory gives `.fileWriteFileExists`. `DownloadDestination.resolve()` keeps its 1.0 behavior and removes an existing file for `.fileURL(_, removeIfExists: true)` immediately; the transports do not call it.
 
 `download(_:to:)` without `progress` is a convenience overload. Conformers of `APIClientProtocol` must implement `download(_:to:progress:)`.
 
@@ -439,7 +439,7 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 
 ## Status & known issues
 
-The package is a prototype. The issues below were confirmed by reading the code. Those marked *(reproduced)* are also covered by tests that wrap the failing assertion in `XCTExpectFailure(KnownIssue.…)` (`Tests/NetworkingAlamofireTests/KnownIssues.swift`); fixing one makes that test fail until the wrapper is removed.
+The package is a prototype. The issues below were confirmed by reading the code; none is covered by a test yet.
 
 **URLSession transport**
 - After a transport error, `retry` receives the previous attempt's response instead of `nil`. When the previous attempt was the 401 that triggered a refresh, `AuthInterceptor` refreshes again, and `RetryInterceptor` decides by the old status code. The Alamofire transport passes the current attempt's response, which is `nil` after a transport error.
@@ -450,8 +450,6 @@ The package is a prototype. The issues below were confirmed by reading the code.
 
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
-- *(reproduced)* When a `download` is retried, each failed attempt's file stays in the temporary directory as `Alamofire_CFNetworkDownload_*.tmp`. Alamofire's `DownloadRequest` forgets the previous attempt's `fileURL` on retry without deleting the file, and the transport removes only the last attempt's file.
-- *(reproduced)* Cancelling the calling task while a request waits for a retry delay does not end with `APIError.cancelled`. A cancelled `download` never finishes: Alamofire finishes the cancelled request, its response serializer asks the retrier again, `RetryInterceptor` asks for another retry, and `Session` skips retries of cancelled requests, so the response is never delivered. A cancelled multipart `upload` throws the last attempt's error, such as `.server(503)`. `send` and `sendVoid` use the same `DataRequest` path as `upload` but are not tested.
 - `validate()` also checks a non-empty response's `Content-Type` against the request's `Accept`, which `EndpointAdapter` sets to `application/json` unless the endpoint provides one. A `download` of, say, `application/zip`, or a `sendVoid` answered with `text/plain`, fails with `AFError.responseValidationFailed(.unacceptableContentType)`, mapped to `APIError.transport`. The URLSession transport does not check `Content-Type`.
 
 **Both transports**
