@@ -10,6 +10,19 @@ private struct EchoEndpoint: APIEndpoint {
     var method: HTTPMethod { .get }
 }
 
+private struct AvatarUploadEndpoint: APIEndpoint {
+    var path: String { "/avatar" }
+    var method: HTTPMethod { .post }
+    var body: RequestBody {
+        .multipart([.data(Data("avatar-bytes".utf8), name: "avatar", filename: "avatar.jpg", mimeType: "image/jpeg")])
+    }
+}
+
+private struct FileEndpoint: APIEndpoint {
+    var path: String { "/files/1" }
+    var method: HTTPMethod { .get }
+}
+
 /// 401 → refresh → retry through the real Alamofire transport.
 final class AlamofireAuthRefreshTests: XCTestCase {
 
@@ -101,6 +114,48 @@ final class AlamofireAuthRefreshTests: XCTestCase {
         XCTAssertEqual(refreshCount, 1)
     }
 
+    func test_401_multipartUpload_refreshesAndResendsTheSameBody() async throws {
+        StubProtocol.reset { Self.respond(to: $0, validToken: "access-1") }
+        let server = RotatingAuthServer()
+        let client = makeClient(server: server, store: MockTokenStore(initial: Self.initialTokens))
+        let bodiesBefore = try TemporaryFiles.multipartBodies()
+
+        let result: Echo = try await client.upload(AvatarUploadEndpoint(), as: Echo.self)
+
+        XCTAssertEqual(result, Echo(value: "ok"))
+        XCTAssertEqual(StubProtocol.recordedRequests.map { $0.value(forHTTPHeaderField: "Authorization") },
+                       ["Bearer access-0", "Bearer access-1"])
+        let bodies = StubProtocol.recordedBodies
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(bodies.first, bodies.last)
+        XCTAssertTrue(String(decoding: try XCTUnwrap(bodies.last ?? nil), as: UTF8.self).contains("avatar-bytes"))
+        let refreshCount = await server.refreshCount
+        XCTAssertEqual(refreshCount, 1)
+        XCTAssertEqual(try TemporaryFiles.multipartBodies(), bodiesBefore)
+    }
+
+    func test_401_download_refreshesAndPlacesOnlyTheSuccessfulBody() async throws {
+        StubProtocol.reset { Self.respond(to: $0, validToken: "access-1") }
+        let server = RotatingAuthServer()
+        let client = makeClient(server: server, store: MockTokenStore(initial: Self.initialTokens))
+        let target = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NetworkingKitTests-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: target) }
+        let downloadsBefore = try TemporaryFiles.downloads()
+
+        let url = try await client.download(FileEndpoint(), to: .fileURL(target))
+
+        XCTAssertEqual(url, target)
+        XCTAssertEqual(try JSONDecoder().decode(Echo.self, from: Data(contentsOf: target)), Echo(value: "ok"))
+        XCTAssertEqual(StubProtocol.recordedRequests.map { $0.value(forHTTPHeaderField: "Authorization") },
+                       ["Bearer access-0", "Bearer access-1"])
+        let refreshCount = await server.refreshCount
+        XCTAssertEqual(refreshCount, 1)
+        try XCTExpectFailure(KnownIssue.retriedDownloadsLeak) {
+            XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
+        }
+    }
+
     func test_rejectedRefresh_throwsUnauthorized() async {
         StubProtocol.reset { Self.respond(to: $0, validToken: "access-1") }
         let server = RotatingAuthServer()
@@ -119,7 +174,7 @@ final class AlamofireAuthRefreshTests: XCTestCase {
     }
 }
 
-private final class LockedCounter: @unchecked Sendable {
+final class LockedCounter: @unchecked Sendable {
     private var _value = 0
     private let lock = NSLock()
 

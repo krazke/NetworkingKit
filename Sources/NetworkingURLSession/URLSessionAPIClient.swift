@@ -71,30 +71,20 @@ public final class URLSessionAPIClient: APIClientProtocol {
         let (built, _) = try URLRequestBuilder.build(endpoint,
                                                      configuration: configuration,
                                                      encoder: encoder)
-        let request = try await interceptor.adapt(built)
-
         let target = try destination.targetURL()
-
         let observer = ProgressObserver(handler: progress)
-        let start = Date()
 
-        do {
-            let (location, response) = try await session.download(for: request, delegate: observer)
-            // Discards the download when any step below fails; a no-op once the file has been moved.
-            defer { try? FileManager.default.removeItem(at: location) }
-            try Task.checkCancellation()
-            try await fireDidReceive(request: request,
-                                     response: response,
-                                     data: nil,
-                                     start: start)
-            try validate(response: response, data: nil)
-            try destination.moveDownloadedFile(at: location, to: target)
-            return target
-        } catch is CancellationError {
-            throw APIError.cancelled
-        } catch {
-            throw mapError(error)
-        }
+        let (location, response) = try await sendWithRetry(
+            initial: built,
+            perform: { try await self.session.download(for: $0, delegate: observer) },
+            responseBody: { _ in nil },
+            discard: { try? FileManager.default.removeItem(at: $0) }
+        )
+        // Discards the download when it cannot be placed; a no-op once the file has been moved.
+        defer { try? FileManager.default.removeItem(at: location) }
+        try validate(response: response, data: nil)
+        try destination.moveDownloadedFile(at: location, to: target)
+        return target
     }
 
     // MARK: - Internal
@@ -104,7 +94,7 @@ public final class URLSessionAPIClient: APIClientProtocol {
         let (built, _) = try URLRequestBuilder.build(endpoint,
                                                      configuration: configuration,
                                                      encoder: encoder)
-        return try await sendWithRetry(initial: built)
+        return try await sendWithRetry(initial: built) { try await self.session.data(for: $0) }
     }
 
     private func executeUpload(_ endpoint: APIEndpoint,
@@ -116,47 +106,54 @@ public final class URLSessionAPIClient: APIClientProtocol {
 
         guard let parts else {
             // Не multipart — обычный upload через body
-            return try await sendWithRetry(initial: built)
+            return try await sendWithRetry(initial: built) { try await self.session.data(for: $0) }
         }
 
         let builder = MultipartFormDataBuilder()
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).multipart")
         // Declared before writing: a failed write leaves a partial file behind.
+        // Every attempt uploads this one file; it is removed once, after the last attempt.
         defer { try? FileManager.default.removeItem(at: tempURL) }
         _ = try builder.writeBody(parts: parts, to: tempURL)
 
         var request = built
         request.setValue(builder.contentType, forHTTPHeaderField: "Content-Type")
-
-        let request2 = try await interceptor.adapt(request)
         let observer = ProgressObserver(handler: progress)
-        let start = Date()
 
-        do {
-            let (data, response) = try await session.upload(for: request2,
-                                                            fromFile: tempURL,
-                                                            delegate: observer)
-            try Task.checkCancellation()
-            try await fireDidReceive(request: request2,
-                                     response: response,
-                                     data: data,
-                                     start: start)
-            return (data, response)
-        } catch is CancellationError {
-            throw APIError.cancelled
-        } catch {
-            throw mapError(error)
+        return try await sendWithRetry(initial: request) {
+            try await self.session.upload(for: $0, fromFile: tempURL, delegate: observer)
         }
     }
 
-    private func sendWithRetry(initial: URLRequest) async throws -> (Data, URLResponse) {
+    /// `sendWithRetry(initial:perform:responseBody:discard:)` for a response body loaded into memory.
+    private func sendWithRetry(initial: URLRequest,
+                               perform: (URLRequest) async throws -> (Data, URLResponse)) async throws -> (Data, URLResponse) {
+        try await sendWithRetry(initial: initial, perform: perform, responseBody: { $0 }, discard: { _ in })
+    }
+
+    /// Sends `initial` through the interceptor chain until an attempt succeeds or `retry` declines.
+    ///
+    /// Every attempt runs `adapt` again, so a retry after a 401 refresh carries the new token.
+    ///
+    /// - Parameters:
+    ///   - perform: Sends one adapted request. Called once per attempt.
+    ///   - responseBody: The in-memory response body, for logging and `APIError.server`;
+    ///     `nil` when the body was written to a file.
+    ///   - discard: Releases the payload of an attempt that is not returned, such as a downloaded file.
+    ///     Called once for every failed or retried attempt.
+    /// - Returns: The payload and response of the first 2xx or non-HTTP response. The caller owns the payload.
+    /// - Throws: `APIError`. `.cancelled` when the task is cancelled, also during a retry delay.
+    private func sendWithRetry<Payload>(initial: URLRequest,
+                                        perform: (URLRequest) async throws -> (Payload, URLResponse),
+                                        responseBody: (Payload) -> Data?,
+                                        discard: (Payload) -> Void) async throws -> (Payload, URLResponse) {
         var attempt = 0
         var lastResponse: HTTPURLResponse?
 
         while true {
             attempt += 1
-            try Task.checkCancellation()
+            guard !Task.isCancelled else { throw APIError.cancelled }
 
             let request: URLRequest
             do {
@@ -166,68 +163,56 @@ public final class URLSessionAPIClient: APIClientProtocol {
             }
 
             let start = Date()
+            let decision: RetryDecision
+            let failure: APIError
             do {
-                let (data, response) = try await session.data(for: request)
+                let (payload, response) = try await perform(request)
+                var returnsPayload = false
+                defer { if !returnsPayload { discard(payload) } }
                 try Task.checkCancellation()
-                let http = response as? HTTPURLResponse
                 try await fireDidReceive(request: request,
                                          response: response,
-                                         data: data,
+                                         data: responseBody(payload),
                                          start: start)
 
-                if let http, !HTTPStatus.is2xx(http.statusCode) {
-                    let mapped: APIError = {
-                        switch http.statusCode {
-                        case 401: return .unauthorized
-                        case 403: return .forbidden
-                        case 404: return .notFound
-                        default:
-                            return .server(statusCode: http.statusCode,
-                                           data: data,
-                                           message: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
-                        }
-                    }()
-                    let decision = await interceptor.retry(request,
-                                                           response: http,
-                                                           error: mapped,
-                                                           attempt: attempt)
-                    switch decision {
-                    case .doNotRetry:
-                        throw mapped
-                    case .retry:
-                        lastResponse = http
-                        continue
-                    case .retryAfter(let delay):
-                        try await Task.sleep(for: .seconds(delay))
-                        lastResponse = http
-                        continue
-                    }
+                guard let http = response as? HTTPURLResponse, !HTTPStatus.is2xx(http.statusCode) else {
+                    returnsPayload = true
+                    return (payload, response)
                 }
-
-                return (data, response)
+                failure = statusError(http, data: responseBody(payload))
+                decision = await interceptor.retry(request,
+                                                   response: http,
+                                                   error: failure,
+                                                   attempt: attempt)
+                lastResponse = http
             } catch is CancellationError {
                 throw APIError.cancelled
             } catch let urlError as URLError where urlError.code == .cancelled {
                 throw APIError.cancelled
             } catch let urlError as URLError {
                 configuration.logger?.didFail(request, error: urlError)
-                let decision = await interceptor.retry(request,
-                                                       response: lastResponse,
-                                                       error: urlError,
-                                                       attempt: attempt)
-                switch decision {
-                case .doNotRetry:
-                    throw APIError.transport(urlError)
-                case .retry:
-                    continue
-                case .retryAfter(let delay):
-                    try await Task.sleep(for: .seconds(delay))
-                    continue
-                }
+                failure = .transport(urlError)
+                decision = await interceptor.retry(request,
+                                                   response: lastResponse,
+                                                   error: urlError,
+                                                   attempt: attempt)
             } catch let apiError as APIError {
                 throw apiError
             } catch {
                 throw APIError.unknown(SendableErrorBox(error))
+            }
+
+            switch decision {
+            case .doNotRetry:
+                throw failure
+            case .retry:
+                continue
+            case .retryAfter(let delay):
+                do {
+                    try await Task.sleep(for: .seconds(delay))
+                } catch {
+                    throw APIError.cancelled
+                }
             }
         }
     }
@@ -237,15 +222,20 @@ public final class URLSessionAPIClient: APIClientProtocol {
             throw APIError.invalidResponse
         }
         guard HTTPStatus.is2xx(http.statusCode) else {
-            switch http.statusCode {
-            case 401: throw APIError.unauthorized
-            case 403: throw APIError.forbidden
-            case 404: throw APIError.notFound
-            default:
-                throw APIError.server(statusCode: http.statusCode,
-                                      data: data,
-                                      message: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
-            }
+            throw statusError(http, data: data)
+        }
+    }
+
+    /// The error for a non-2xx response.
+    private func statusError(_ http: HTTPURLResponse, data: Data?) -> APIError {
+        switch http.statusCode {
+        case 401: return .unauthorized
+        case 403: return .forbidden
+        case 404: return .notFound
+        default:
+            return .server(statusCode: http.statusCode,
+                           data: data,
+                           message: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
         }
     }
 

@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 83 XCTest cases (Core 32, URLSession 25, WebSocket 5, Alamofire 21). All 83 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
+The suite contains 99 XCTest cases (Core 32, URLSession 33, WebSocket 5, Alamofire 29). All 99 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4. Six assertions in the Alamofire tests are wrapped in `XCTExpectFailure` because they reproduce [known issues](#status--known-issues); they are reported as expected failures.
 
 ## Adding the package
 
@@ -221,7 +221,11 @@ Precedence is endpoint > dynamic > global: `HeadersInterceptor` sets a global or
 
 Both transports build the same chain from `NetworkConfiguration`: `HeadersInterceptor`, then `AuthInterceptor` (only when `refreshAction` is set), then `additionalInterceptors`, then `RetryInterceptor`. The URLSession transport also inserts `LoggingInterceptor` when a logger is configured; the Alamofire transport logs through an internal `EventMonitor` instead. `CompositeInterceptor` runs `adapt` sequentially, and for `retry` the first decision other than `.doNotRetry` wins.
 
-**Refresh on 401.** `AuthInterceptor` adds `Authorization: Bearer <accessToken>` from the `TokenStore`. On a 401 it calls `refreshAction`, saves the new tokens and retries the request with them. Both transports behave the same way:
+Every request kind goes through this chain in both transports: `send`, `sendVoid`, `upload` (multipart or not) and `download`. Each attempt runs `adapt` again, and after a non-2xx response or a transport error `retry` decides whether to send another attempt. Retries reuse the request body: the URLSession transport writes a multipart body to disk once and uploads that file on every attempt. A failed attempt's downloaded file is never placed at the destination (see [Download](#download)).
+
+Cancelling the calling task ends the request with `APIError.cancelled`, also while it waits for a retry delay. The Alamofire transport does not do this yet; see known issues.
+
+**Refresh on 401.** `AuthInterceptor` adds `Authorization: Bearer <accessToken>` from the `TokenStore`. On a 401 it calls `refreshAction`, saves the new tokens and retries the request with them, whatever the HTTP method, so a POST `upload` is refreshed too. Both transports behave the same way:
 
 - Concurrent 401s share one in-flight refresh, so a rotating (single-use) refresh token is spent exactly once.
 - A 401 for a request sent with an older access token than the stored one is retried with the current token without another refresh.
@@ -241,7 +245,9 @@ RetryConfiguration(
 )
 ```
 
-Requests with no response (transport errors) and responses with a retryable status are retried for idempotent methods. The delay is `min(maxDelay, baseDelay * 2^(attempt-1))` multiplied by the jitter factor, so it can exceed `maxDelay` by up to the upper jitter bound. The `Retry-After` header is not read.
+Requests with no response (transport errors) and responses with a retryable status are retried only for `retryableMethods`, by default GET, HEAD, PUT and DELETE; a multipart `upload` with POST therefore gets no status or transport retries unless POST is added. The delay is `min(maxDelay, baseDelay * 2^(attempt-1))` multiplied by the jitter factor, so it can exceed `maxDelay` by up to the upper jitter bound. The `Retry-After` header is not read.
+
+**Progress across retries.** A `ProgressHandler` reports the fraction of the current attempt's request body sent (`upload`) or response body received (`download`). When a request is retried, the values start over near 0, so they can decrease, and a failed attempt may already have reported 1.0. Both transports behave this way. The Alamofire transport calls the handler on the main queue, the URLSession transport on its session's delegate queue.
 
 ## Errors
 
@@ -293,7 +299,7 @@ let result = try await client.upload(
 )
 ```
 
-The URLSession transport writes the body to a temporary file and uploads it with `URLSession.upload(for:fromFile:delegate:)`, and removes the file afterwards, also when writing it fails. The Alamofire transport uses `MultipartFormData`. Both transports escape field names and filenames in `Content-Disposition` as the WHATWG HTML Standard does for multipart/form-data: `"` becomes `%22`, CR `%0D` and LF `%0A`, and a lone CR or LF in a field name is first normalized to CRLF. No other characters are escaped.
+The URLSession transport writes the body to a temporary file once, uploads that file with `URLSession.upload(for:fromFile:delegate:)` on every attempt, and removes it after the last attempt, also when writing it fails. The Alamofire transport uses `MultipartFormData`. Both transports escape field names and filenames in `Content-Disposition` as the WHATWG HTML Standard does for multipart/form-data: `"` becomes `%22`, CR `%0D` and LF `%0A`, and a lone CR or LF in a field name is first normalized to CRLF. No other characters are escaped.
 
 `RequestBody.urlEncoded` is serialized by the WHATWG `application/x-www-form-urlencoded` rules in both transports: every byte except ASCII letters, digits and `*-._` is percent-encoded, and a space becomes `+`. Fields are sorted by name.
 
@@ -317,7 +323,7 @@ let savedURL = try await client.download(
 | A directory exists at the destination | The download fails; the directory is never replaced. |
 | The request fails, including a non-2xx status | The destination is left untouched. |
 
-The file is moved into place only after a 2xx response has been downloaded completely. When it cannot be placed, `download` throws `APIError.transport` wrapping a `CocoaError`; an existing file or directory gives `.fileWriteFileExists`. `DownloadDestination.resolve()` keeps its 1.0 behavior and removes an existing file for `.fileURL(_, removeIfExists: true)` immediately; the transports do not call it.
+The file is moved into place only after a 2xx response has been downloaded completely. When the request is retried, the URLSession transport deletes each failed attempt's download; the Alamofire transport currently leaves them in the temporary directory (see known issues). When it cannot be placed, `download` throws `APIError.transport` wrapping a `CocoaError`; an existing file or directory gives `.fileWriteFileExists`. `DownloadDestination.resolve()` keeps its 1.0 behavior and removes an existing file for `.fileURL(_, removeIfExists: true)` immediately; the transports do not call it.
 
 `download(_:to:)` without `progress` is a convenience overload. Conformers of `APIClientProtocol` must implement `download(_:to:progress:)`.
 
@@ -433,16 +439,19 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 
 ## Status & known issues
 
-The package is a prototype. The issues below were confirmed by reading the code; none is covered by a test yet.
+The package is a prototype. The issues below were confirmed by reading the code. Those marked *(reproduced)* are also covered by tests that wrap the failing assertion in `XCTExpectFailure(KnownIssue.…)` (`Tests/NetworkingAlamofireTests/KnownIssues.swift`); fixing one makes that test fail until the wrapper is removed.
 
 **URLSession transport**
-- Multipart `upload` and `download` run `adapt` once and never consult `retry`, so 401 refresh and retry do not apply to them. Plain `send`/`sendVoid` are covered.
+- After a transport error, `retry` receives the previous attempt's response instead of `nil`. When the previous attempt was the 401 that triggered a refresh, `AuthInterceptor` refreshes again, and `RetryInterceptor` decides by the old status code. The Alamofire transport passes the current attempt's response, which is `nil` after a transport error.
+- A non-multipart `upload` never calls its `ProgressHandler`: the request is sent with `URLSession.data(for:)` without a task delegate. The Alamofire transport registers the handler with `uploadProgress` in this case.
 - `PinningDelegate` never calls `SecTrustEvaluateWithError`. When a certificate or key matches, expiry, hostname and chain validation are skipped.
 - A pin mismatch cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
 - When the multipart body cannot be written (for example, a `.file` part points to a missing file), `upload` throws the underlying Foundation error instead of an `APIError`.
 
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
+- *(reproduced)* When a `download` is retried, each failed attempt's file stays in the temporary directory as `Alamofire_CFNetworkDownload_*.tmp`. Alamofire's `DownloadRequest` forgets the previous attempt's `fileURL` on retry without deleting the file, and the transport removes only the last attempt's file.
+- *(reproduced)* Cancelling the calling task while a request waits for a retry delay does not end with `APIError.cancelled`. A cancelled `download` never finishes: Alamofire finishes the cancelled request, its response serializer asks the retrier again, `RetryInterceptor` asks for another retry, and `Session` skips retries of cancelled requests, so the response is never delivered. A cancelled multipart `upload` throws the last attempt's error, such as `.server(503)`. `send` and `sendVoid` use the same `DataRequest` path as `upload` but are not tested.
 - `validate()` also checks a non-empty response's `Content-Type` against the request's `Accept`, which `EndpointAdapter` sets to `application/json` unless the endpoint provides one. A `download` of, say, `application/zip`, or a `sendVoid` answered with `text/plain`, fails with `AFError.responseValidationFailed(.unacceptableContentType)`, mapped to `APIError.transport`. The URLSession transport does not check `Content-Type`.
 
 **Both transports**
@@ -459,7 +468,7 @@ The package is a prototype. The issues below were confirmed by reading the code;
 - There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
 
 **Missing**
-- Tests for pinning, cancellation, and the Alamofire mapping of decoding and transport errors.
+- Tests for pinning, for cancellation outside a retry delay, and for the Alamofire mapping of decoding and transport errors.
 - `Retry-After` support and proactive refresh (`AuthTokens.isExpired` is unused).
 - Background sessions, reachability (`NWPathMonitor`) and GraphQL are out of scope.
 - No `LICENSE` file and no DocC catalog.

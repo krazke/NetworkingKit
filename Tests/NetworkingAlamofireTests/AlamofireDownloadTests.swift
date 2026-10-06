@@ -27,11 +27,14 @@ final class AlamofireDownloadTests: XCTestCase {
         try await super.tearDown()
     }
 
-    private func makeClient() -> AlamofireAPIClient {
+    /// Retries idempotent methods with a negligible delay.
+    private static let fastRetry = RetryConfiguration(limit: 3, baseDelay: 0.001, maxDelay: 0.01, jitter: 1.0...1.0)
+
+    private func makeClient(retry: RetryConfiguration = .none) -> AlamofireAPIClient {
         let config = NetworkConfiguration(
             baseURL: URL(string: "https://api.test")!,
             sessionConfiguration: .stubbed,
-            retry: .none
+            retry: retry
         )
         return AlamofireAPIClient(configuration: config)
     }
@@ -157,5 +160,73 @@ final class AlamofireDownloadTests: XCTestCase {
             _ = try await client.download(FileEndpoint(), to: .fileURL(target))
         }
         XCTAssertEqual(try Self.contents(of: child), "keep")
+    }
+
+    // MARK: - Retry
+
+    func test_retryable503_isRetriedAndOnlyTheSuccessfulBodyIsPlaced() async throws {
+        let target = directory.appendingPathComponent("file.bin")
+        try Self.write("old", to: target)
+        let attempts = LockedCounter()
+        StubProtocol.reset { _ in
+            let status = attempts.increment() == 1 ? 503 : 200
+            return .init(statusCode: status, data: Data(status == 200 ? "new".utf8 : "unavailable".utf8),
+                         headers: ["Content-Type": "application/json"], delay: 0)
+        }
+        let downloadsBefore = try TemporaryFiles.downloads()
+
+        let url = try await makeClient(retry: Self.fastRetry).download(FileEndpoint(), to: .fileURL(target))
+
+        XCTAssertEqual(url, target)
+        XCTAssertEqual(try Self.contents(of: target), "new")
+        XCTAssertEqual(attempts.value, 2)
+        try XCTExpectFailure(KnownIssue.retriedDownloadsLeak) {
+            XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
+        }
+    }
+
+    func test_retryable503_whenRetriesRunOut_keepsExistingFileAndDiscardsEveryAttempt() async throws {
+        let target = directory.appendingPathComponent("file.bin")
+        try Self.write("old", to: target)
+        Self.stub(status: 503, body: "unavailable")
+        let downloadsBefore = try TemporaryFiles.downloads()
+
+        do {
+            _ = try await makeClient(retry: Self.fastRetry).download(FileEndpoint(), to: .fileURL(target))
+            XCTFail("Expected error")
+        } catch APIError.server(let statusCode, _, _) {
+            XCTAssertEqual(statusCode, 503)
+        } catch {
+            XCTFail("Unexpected: \(error)")
+        }
+        XCTAssertEqual(StubProtocol.recordedRequests.count, Self.fastRetry.limit)
+        XCTAssertEqual(try Self.contents(of: target), "old")
+        try XCTExpectFailure(KnownIssue.retriedDownloadsLeak) {
+            XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
+        }
+    }
+
+    func test_cancellationDuringRetryDelay_throwsCancelled() async throws {
+        let target = directory.appendingPathComponent("file.bin")
+        Self.stub(status: 503, body: "unavailable")
+        let client = makeClient(retry: RetryConfiguration(limit: 3, baseDelay: 30, maxDelay: 30, jitter: 1.0...1.0))
+        let downloadsBefore = try TemporaryFiles.downloads()
+
+        let task = Task { try await client.download(FileEndpoint(), to: .fileURL(target)) }
+        try await StubProtocol.waitForRequests(1)
+        // Lets the transport receive the 503 and start waiting out the 30-second delay.
+        try await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        let outcome = await task.result(timeout: .seconds(5))
+
+        XCTExpectFailure(KnownIssue.downloadCancelledDuringRetryDelayNeverFinishes) {
+            XCTAssertCancelled(outcome)
+        }
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+        // The unfinished request still owns the 503 attempt's file.
+        try XCTExpectFailure(KnownIssue.downloadCancelledDuringRetryDelayNeverFinishes) {
+            XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
+        }
     }
 }

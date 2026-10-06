@@ -42,11 +42,14 @@ final class AlamofireRequestBodyTests: XCTestCase {
         }
     }
 
-    private func makeClient() -> AlamofireAPIClient {
+    /// Retries idempotent methods with a negligible delay.
+    private static let fastRetry = RetryConfiguration(limit: 3, baseDelay: 0.001, maxDelay: 0.01, jitter: 1.0...1.0)
+
+    private func makeClient(retry: RetryConfiguration = .none) -> AlamofireAPIClient {
         let config = NetworkConfiguration(
             baseURL: URL(string: "https://api.test")!,
             sessionConfiguration: .stubbed,
-            retry: .none
+            retry: retry
         )
         return AlamofireAPIClient(configuration: config)
     }
@@ -80,6 +83,72 @@ final class AlamofireRequestBodyTests: XCTestCase {
         XCTAssertFalse(lines.contains { $0.hasPrefix("X-Injected") }, lines.joined(separator: "\n"))
         XCTAssertTrue(lines.contains("payload"))
         XCTAssertTrue(lines.contains("value"))
+    }
+
+    // MARK: - Retry
+
+    private static let payload: [MultipartPart] = [.data(Data("payload".utf8), name: "file",
+                                                           filename: "file.txt", mimeType: "text/plain")]
+
+    func test_multipartUpload_retryable503_isNotRetriedForPost() async throws {
+        StubProtocol.reset { _ in .init(statusCode: 503, data: Data(), headers: [:], delay: 0) }
+        let bodiesBefore = try TemporaryFiles.multipartBodies()
+
+        do {
+            _ = try await makeClient(retry: Self.fastRetry).upload(MultipartEndpoint(parts: Self.payload),
+                                                                  as: Echo.self)
+            XCTFail("Expected error")
+        } catch APIError.server(let statusCode, _, _) {
+            XCTAssertEqual(statusCode, 503)
+        } catch {
+            XCTFail("Unexpected: \(error)")
+        }
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+        XCTAssertEqual(try TemporaryFiles.multipartBodies(), bodiesBefore)
+    }
+
+    func test_multipartUpload_retryablePost_resendsTheSameBody() async throws {
+        let attempts = LockedCounter()
+        StubProtocol.reset { _ in
+            attempts.increment() == 1
+                ? .init(statusCode: 503, data: Data(), headers: [:], delay: 0)
+                : .init(statusCode: 200, data: Data(#"{"value":"ok"}"#.utf8),
+                        headers: ["Content-Type": "application/json"], delay: 0)
+        }
+        var retry = Self.fastRetry
+        retry.retryableMethods = [.post]
+        let bodiesBefore = try TemporaryFiles.multipartBodies()
+
+        let result = try await makeClient(retry: retry).upload(MultipartEndpoint(parts: Self.payload),
+                                                               as: Echo.self)
+
+        XCTAssertEqual(result, Echo(value: "ok"))
+        let bodies = StubProtocol.recordedBodies
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(bodies.first, bodies.last)
+        XCTAssertTrue(String(decoding: try XCTUnwrap(bodies.last ?? nil), as: UTF8.self).contains("payload"))
+        XCTAssertEqual(try TemporaryFiles.multipartBodies(), bodiesBefore)
+    }
+
+    func test_multipartUpload_cancellationDuringRetryDelay_throwsCancelled() async throws {
+        StubProtocol.reset { _ in .init(statusCode: 503, data: Data(), headers: [:], delay: 0) }
+        var retry = RetryConfiguration(limit: 3, baseDelay: 30, maxDelay: 30, jitter: 1.0...1.0)
+        retry.retryableMethods = [.post]
+        let client = makeClient(retry: retry)
+        let bodiesBefore = try TemporaryFiles.multipartBodies()
+
+        let task = Task { try await client.upload(MultipartEndpoint(parts: Self.payload), as: Echo.self) }
+        try await StubProtocol.waitForRequests(1)
+        // Lets the transport receive the 503 and start waiting out the 30-second delay.
+        try await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        let outcome = await task.result(timeout: .seconds(5))
+
+        XCTExpectFailure(KnownIssue.cancellationDuringRetryDelayThrowsLastError) {
+            XCTAssertCancelled(outcome)
+        }
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+        XCTAssertEqual(try TemporaryFiles.multipartBodies(), bodiesBefore)
     }
 }
 

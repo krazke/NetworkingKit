@@ -30,6 +30,21 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     /// `httpBodyStream` rather than `httpBody`, so it is read in `startLoading`.
     static var recordedBodies: [Data?] { queue.sync { bodies } }
 
+    struct WaitTimeout: Error { let expected: Int; let received: Int }
+
+    /// Polls until at least `count` requests have arrived.
+    ///
+    /// - Throws: `WaitTimeout` when they have not arrived within `timeout`.
+    static func waitForRequests(_ count: Int, timeout: Duration = .seconds(5)) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while recordedRequests.count < count {
+            guard ContinuousClock.now < deadline else {
+                throw WaitTimeout(expected: count, received: recordedRequests.count)
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 

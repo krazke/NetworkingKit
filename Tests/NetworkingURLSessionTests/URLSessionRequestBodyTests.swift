@@ -42,11 +42,14 @@ final class URLSessionRequestBodyTests: XCTestCase {
         }
     }
 
-    private func makeClient() -> URLSessionAPIClient {
+    /// Retries idempotent methods with a negligible delay.
+    private static let fastRetry = RetryConfiguration(limit: 3, baseDelay: 0.001, maxDelay: 0.01, jitter: 1.0...1.0)
+
+    private func makeClient(retry: RetryConfiguration = .none) -> URLSessionAPIClient {
         let config = NetworkConfiguration(
             baseURL: URL(string: "https://api.test")!,
             sessionConfiguration: .stubbed,
-            retry: .none
+            retry: retry
         )
         return URLSessionAPIClient(configuration: config)
     }
@@ -85,7 +88,7 @@ final class URLSessionRequestBodyTests: XCTestCase {
     func test_multipartUpload_removesTempFileWhenWritingBodyFails() async throws {
         let missing = FileManager.default.temporaryDirectory
             .appendingPathComponent("missing-\(UUID().uuidString).bin")
-        let before = try Self.multipartTempFiles()
+        let before = try TemporaryFiles.multipartBodies()
 
         do {
             _ = try await makeClient().upload(MultipartEndpoint(parts: [.file(missing, name: "file")]),
@@ -95,13 +98,72 @@ final class URLSessionRequestBodyTests: XCTestCase {
             // Any error: the part's file does not exist.
         }
 
-        XCTAssertEqual(try Self.multipartTempFiles(), before)
+        XCTAssertEqual(try TemporaryFiles.multipartBodies(), before)
         XCTAssertTrue(StubProtocol.recordedRequests.isEmpty)
     }
 
-    private static func multipartTempFiles() throws -> Set<String> {
-        Set(try FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)
-            .filter { $0.hasSuffix(".multipart") })
+    // MARK: - Retry
+
+    private static let payload: [MultipartPart] = [.data(Data("payload".utf8), name: "file",
+                                                           filename: "file.txt", mimeType: "text/plain")]
+
+    func test_multipartUpload_retryable503_isNotRetriedForPost() async throws {
+        StubProtocol.reset { _ in .init(statusCode: 503, data: Data(), headers: [:], delay: 0) }
+        let bodiesBefore = try TemporaryFiles.multipartBodies()
+
+        do {
+            _ = try await makeClient(retry: Self.fastRetry).upload(MultipartEndpoint(parts: Self.payload),
+                                                                  as: Echo.self)
+            XCTFail("Expected error")
+        } catch APIError.server(let statusCode, _, _) {
+            XCTAssertEqual(statusCode, 503)
+        } catch {
+            XCTFail("Unexpected: \(error)")
+        }
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+        XCTAssertEqual(try TemporaryFiles.multipartBodies(), bodiesBefore)
+    }
+
+    func test_multipartUpload_retryablePost_resendsTheSameBody() async throws {
+        let attempts = LockedCounter()
+        StubProtocol.reset { _ in
+            attempts.increment() == 1
+                ? .init(statusCode: 503, data: Data(), headers: [:], delay: 0)
+                : .init(statusCode: 200, data: Data(#"{"value":"ok"}"#.utf8),
+                        headers: ["Content-Type": "application/json"], delay: 0)
+        }
+        var retry = Self.fastRetry
+        retry.retryableMethods = [.post]
+        let bodiesBefore = try TemporaryFiles.multipartBodies()
+
+        let result = try await makeClient(retry: retry).upload(MultipartEndpoint(parts: Self.payload),
+                                                               as: Echo.self)
+
+        XCTAssertEqual(result, Echo(value: "ok"))
+        let bodies = StubProtocol.recordedBodies
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(bodies.first, bodies.last)
+        XCTAssertTrue(String(decoding: try XCTUnwrap(bodies.last ?? nil), as: UTF8.self).contains("payload"))
+        XCTAssertEqual(try TemporaryFiles.multipartBodies(), bodiesBefore)
+    }
+
+    func test_multipartUpload_cancellationDuringRetryDelay_throwsCancelled() async throws {
+        StubProtocol.reset { _ in .init(statusCode: 503, data: Data(), headers: [:], delay: 0) }
+        var retry = RetryConfiguration(limit: 3, baseDelay: 30, maxDelay: 30, jitter: 1.0...1.0)
+        retry.retryableMethods = [.post]
+        let client = makeClient(retry: retry)
+        let bodiesBefore = try TemporaryFiles.multipartBodies()
+
+        let task = Task { try await client.upload(MultipartEndpoint(parts: Self.payload), as: Echo.self) }
+        try await StubProtocol.waitForRequests(1)
+        // Lets the transport receive the 503 and start waiting out the 30-second delay.
+        try await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        let outcome = await task.result(timeout: .seconds(5))
+
+        XCTAssertCancelled(outcome)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+        XCTAssertEqual(try TemporaryFiles.multipartBodies(), bodiesBefore)
     }
 }
 
