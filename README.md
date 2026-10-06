@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 49 XCTest cases (Core 27, URLSession 10, WebSocket 5, Alamofire 7). All 49 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
+The suite contains 59 XCTest cases (Core 27, URLSession 15, WebSocket 5, Alamofire 12). All 59 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -243,6 +243,12 @@ RetryConfiguration(
 
 Requests with no response (transport errors) and responses with a retryable status are retried for idempotent methods. The delay is `min(maxDelay, baseDelay * 2^(attempt-1))` multiplied by the jitter factor, so it can exceed `maxDelay` by up to the upper jitter bound. The `Retry-After` header is not read.
 
+## Errors
+
+Both transports throw `APIError`. A non-2xx response becomes `.unauthorized` (401), `.forbidden` (403), `.notFound` (404), or `.server(statusCode:data:message:)` for any other status. For `send`, `sendVoid` and `upload`, `.server` carries the raw response body in `data`, so the app can decode its API's error format from it; `message` is a human-readable status description whose wording differs between transports.
+
+401, 403 and 404 carry no body, because their cases have no associated values. `download` failures carry no body either.
+
 ## SSL pinning
 
 ```swift
@@ -421,9 +427,9 @@ The package is a prototype. The issues below were confirmed by reading the code;
 
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
-- `mapError` always sets `data: nil` in `.server(statusCode:data:message:)`, so the error body is lost. The URLSession transport keeps it.
 
 **Both transports**
+- `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
 - `.urlEncoded` bodies are built with `URLComponents.percentEncodedQuery`, which leaves `+` unescaped; a value `a+b` reaches the server as `a b`.
 - The `APIClientProtocol` extension declares `download(_:to:progress:)` with the same signature as the requirement and calls itself. A conformer that omits `download` compiles and then recurses forever.
 
@@ -435,7 +441,7 @@ The package is a prototype. The issues below were confirmed by reading the code;
 - There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
 
 **Missing**
-- Tests for multipart, download, pinning, cancellation and Alamofire error mapping.
+- Tests for successful multipart uploads, download, pinning, cancellation, and the Alamofire mapping of decoding and transport errors.
 - `Retry-After` support and proactive refresh (`AuthTokens.isExpired` is unused).
 - Background sessions, reachability (`NWPathMonitor`) and GraphQL are out of scope.
 - No `LICENSE` file and no DocC catalog.

@@ -66,26 +66,16 @@ public final class AlamofireAPIClient: APIClientProtocol {
         let convertible = adapter(for: endpoint)
         let usedDecoder = decoder ?? configuration.decoderFactory()
 
-        do {
-            return try await session.request(convertible)
-                .validate()
-                .serializingDecodable(T.self, decoder: usedDecoder)
-                .value
-        } catch {
-            throw mapError(error)
-        }
+        return try await value(of: session.request(convertible)
+            .validate()
+            .serializingDecodable(T.self, decoder: usedDecoder))
     }
 
     public func sendVoid(_ endpoint: APIEndpoint) async throws {
         let convertible = adapter(for: endpoint)
-        do {
-            _ = try await session.request(convertible)
-                .validate()
-                .serializingData()
-                .value
-        } catch {
-            throw mapError(error)
-        }
+        _ = try await value(of: session.request(convertible)
+            .validate()
+            .serializingData())
     }
 
     public func upload<T: Decodable & Sendable>(_ endpoint: APIEndpoint,
@@ -97,30 +87,22 @@ public final class AlamofireAPIClient: APIClientProtocol {
 
         // Если не multipart — обычный upload через httpBody
         guard case .multipart(let parts) = endpoint.body else {
-            do {
-                let request = session.request(convertible).validate()
-                if let progress {
-                    request.uploadProgress { p in progress(p.fractionCompleted) }
-                }
-                return try await request.serializingDecodable(T.self, decoder: usedDecoder).value
-            } catch {
-                throw mapError(error)
-            }
-        }
-
-        do {
-            let request = session.upload(multipartFormData: { [self] form in
-                self.appendParts(parts, to: form)
-            }, with: convertible).validate()
-
+            let request = session.request(convertible).validate()
             if let progress {
                 request.uploadProgress { p in progress(p.fractionCompleted) }
             }
-
-            return try await request.serializingDecodable(T.self, decoder: usedDecoder).value
-        } catch {
-            throw mapError(error)
+            return try await value(of: request.serializingDecodable(T.self, decoder: usedDecoder))
         }
+
+        let request = session.upload(multipartFormData: { [self] form in
+            self.appendParts(parts, to: form)
+        }, with: convertible).validate()
+
+        if let progress {
+            request.uploadProgress { p in progress(p.fractionCompleted) }
+        }
+
+        return try await value(of: request.serializingDecodable(T.self, decoder: usedDecoder))
     }
 
     public func download(_ endpoint: APIEndpoint,
@@ -145,6 +127,18 @@ public final class AlamofireAPIClient: APIClientProtocol {
     }
 
     // MARK: - Internal
+
+    /// Awaits `task` and maps a failure together with the response body.
+    /// `DataTask.value` would throw only the `AFError`, which does not carry the body.
+    private func value<Value>(of task: DataTask<Value>) async throws -> Value {
+        let response = await task.response
+        switch response.result {
+        case .success(let value):
+            return value
+        case .failure(let error):
+            throw mapError(error, responseBody: response.data)
+        }
+    }
 
     private func adapter(for endpoint: APIEndpoint) -> EndpointAdapter {
         EndpointAdapter(endpoint: endpoint,
@@ -175,7 +169,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
         }
     }
 
-    private func mapError(_ error: any Error) -> APIError {
+    private func mapError(_ error: any Error, responseBody: Data? = nil) -> APIError {
         if let api = error as? APIError { return api }
 
         if let af = error as? AFError {
@@ -185,12 +179,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
             case 403: return .forbidden
             case 404: return .notFound
             case let code? where (400..<600).contains(code):
-                let data: Data? = {
-                    if case .responseValidationFailed(let reason) = af,
-                       case .unacceptableStatusCode = reason { return nil }
-                    return nil
-                }()
-                return .server(statusCode: code, data: data, message: af.errorDescription)
+                return .server(statusCode: code, data: responseBody, message: af.errorDescription)
             default: break
             }
             if case .responseSerializationFailed(let reason) = af,
