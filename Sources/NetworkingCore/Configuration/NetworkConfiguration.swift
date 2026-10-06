@@ -10,6 +10,7 @@ public struct NetworkConfiguration: @unchecked Sendable {
     public var retry: RetryConfiguration
     public var tokenStore: any TokenStore
     public var refreshAction: AuthInterceptor.RefreshAction?
+    public var refreshWindow: AuthInterceptor.RefreshWindow
     public var additionalInterceptors: [any RequestInterceptor]
     public var logger: (any NetworkLogger)?
     public var decoderFactory: @Sendable () -> JSONDecoder
@@ -23,6 +24,7 @@ public struct NetworkConfiguration: @unchecked Sendable {
                 retry: RetryConfiguration = .default,
                 tokenStore: any TokenStore = InMemoryTokenStore(),
                 refreshAction: AuthInterceptor.RefreshAction? = nil,
+                refreshWindow: AuthInterceptor.RefreshWindow = .default,
                 additionalInterceptors: [any RequestInterceptor] = [],
                 logger: (any NetworkLogger)? = nil,
                 decoderFactory: @escaping @Sendable () -> JSONDecoder = NetworkConfiguration.defaultDecoder,
@@ -35,6 +37,7 @@ public struct NetworkConfiguration: @unchecked Sendable {
         self.retry = retry
         self.tokenStore = tokenStore
         self.refreshAction = refreshAction
+        self.refreshWindow = refreshWindow
         self.additionalInterceptors = additionalInterceptors
         self.logger = logger
         self.decoderFactory = decoderFactory

@@ -2,7 +2,7 @@
 
 A reusable Swift package for the networking layer of iOS apps. `NetworkingCore` holds transport-agnostic abstractions; `NetworkingAlamofire` and `NetworkingURLSession` are interchangeable transports; `NetworkingWebSocket` is a generic WebSocket client; `NetworkingTesting` provides test doubles.
 
-> **Status: prototype.** The design is stable and the test suite passes, but several defects in auth refresh, pinning, downloads and WebSocket reconnect make it unsuitable for production as-is. See [Status & known issues](#status--known-issues).
+> **Status: prototype.** The design is stable and the test suite passes, but several defects in pinning, downloads and WebSocket reconnect make it unsuitable for production as-is. See [Status & known issues](#status--known-issues).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 34 XCTest cases (Core 20, URLSession 6, WebSocket 5, Alamofire 3). All 34 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
+The suite contains 49 XCTest cases (Core 27, URLSession 10, WebSocket 5, Alamofire 7). All 49 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -221,7 +221,12 @@ Precedence is endpoint > dynamic > global: `HeadersInterceptor` sets a global or
 
 Both transports build the same chain from `NetworkConfiguration`: `HeadersInterceptor`, then `AuthInterceptor` (only when `refreshAction` is set), then `additionalInterceptors`, then `RetryInterceptor`. The URLSession transport also inserts `LoggingInterceptor` when a logger is configured; the Alamofire transport logs through an internal `EventMonitor` instead. `CompositeInterceptor` runs `adapt` sequentially, and for `retry` the first decision other than `.doNotRetry` wins.
 
-**Refresh on 401.** `AuthInterceptor` adds `Authorization: Bearer <accessToken>` from the `TokenStore`. On a 401 it calls `refreshAction` once, saves the new tokens and retries the request. It only does this on the first attempt of a request, and concurrent refreshes are not reliably deduplicated (see known issues).
+**Refresh on 401.** `AuthInterceptor` adds `Authorization: Bearer <accessToken>` from the `TokenStore`. On a 401 it calls `refreshAction`, saves the new tokens and retries the request with them. Both transports behave the same way:
+
+- Concurrent 401s share one in-flight refresh, so a rotating (single-use) refresh token is spent exactly once.
+- A 401 for a request sent with an older access token than the stored one is retried with the current token without another refresh.
+- Refresh does not depend on the attempt number: a request that got a 503, was retried and then got a 401 still refreshes.
+- Refreshes are limited by `NetworkConfiguration.refreshWindow` (default: at most 5 within 30 seconds). Beyond that limit, or when `refreshAction` throws, the request fails with `APIError.unauthorized` instead of looping.
 
 **Retry with backoff.**
 
@@ -408,12 +413,8 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 
 The package is a prototype. The issues below were confirmed by reading the code; none is covered by a test yet.
 
-**Auth**
-- `AuthInterceptor.refreshIfNeeded()` checks `inflight`, then awaits `tokenStore.current()` before assigning `inflight`. Actor reentrancy at that `await` lets two concurrent 401s start two refreshes; with rotating refresh tokens the second one fails.
-- Refresh runs only when `attempt == 1`, and the attempt counter is shared with `RetryInterceptor`. A request that gets 503 and then 401 never refreshes.
-
 **URLSession transport**
-- Multipart `upload` and `download` run `adapt` once and never consult `retry`, so 401 refresh and retry do not apply to them.
+- Multipart `upload` and `download` run `adapt` once and never consult `retry`, so 401 refresh and retry do not apply to them. Plain `send`/`sendVoid` are covered.
 - `download` moves the temporary file with `try? moveItem`. If the target exists (always possible for `.documents` and `.temporary`), the move fails silently and the old file is returned.
 - `PinningDelegate` never calls `SecTrustEvaluateWithError`. When a certificate or key matches, expiry, hostname and chain validation are skipped.
 - A pin mismatch cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
@@ -434,7 +435,7 @@ The package is a prototype. The issues below were confirmed by reading the code;
 - There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
 
 **Missing**
-- Tests for 401 → refresh through a real transport, concurrent refresh, multipart, download, pinning, cancellation and Alamofire error mapping.
+- Tests for multipart, download, pinning, cancellation and Alamofire error mapping.
 - `Retry-After` support and proactive refresh (`AuthTokens.isExpired` is unused).
 - Background sessions, reachability (`NWPathMonitor`) and GraphQL are out of scope.
 - No `LICENSE` file and no DocC catalog.

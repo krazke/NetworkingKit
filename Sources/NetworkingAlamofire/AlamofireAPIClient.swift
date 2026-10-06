@@ -42,6 +42,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
                                                        dynamicHeaders: configuration.dynamicHeaders))
         if let refresh = configuration.refreshAction {
             chain.append(NetworkingCore.AuthInterceptor(tokenStore: configuration.tokenStore,
+                                                        refreshWindow: configuration.refreshWindow,
                                                         refresh: refresh))
         }
         chain.append(contentsOf: configuration.additionalInterceptors)

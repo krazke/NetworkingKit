@@ -29,7 +29,9 @@ public final class URLSessionAPIClient: APIClientProtocol {
             chain.append(LoggingInterceptor(logger: logger))
         }
         if let refresh = configuration.refreshAction {
-            chain.append(AuthInterceptor(tokenStore: configuration.tokenStore, refresh: refresh))
+            chain.append(AuthInterceptor(tokenStore: configuration.tokenStore,
+                                         refreshWindow: configuration.refreshWindow,
+                                         refresh: refresh))
         }
         chain.append(contentsOf: configuration.additionalInterceptors)
         chain.append(RetryInterceptor(configuration: configuration.retry))
