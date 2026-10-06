@@ -65,4 +65,21 @@ final class MockAPIClientTests: XCTestCase {
         _ = try await client.send(GetHorse(horseId: 1), as: Horse.self)
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.04)
     }
+
+    /// `download(_:to:)` without `progress` is a convenience overload that forwards to the requirement.
+    func test_download_withoutProgress_forwardsToRequirement() async throws {
+        let mock = MockAPIClient()
+        await mock.stub(path: "/horses/1", with: .successData(Data("file".utf8)))
+        let target = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NetworkingKitTests-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: target) }
+
+        let client: any APIClientProtocol = mock
+        let url = try await client.download(GetHorse(horseId: 1), to: .fileURL(target))
+
+        XCTAssertEqual(url, target)
+        XCTAssertEqual(try Data(contentsOf: target), Data("file".utf8))
+        let calls = await mock.recordedCalls
+        XCTAssertEqual(calls.map(\.kind), [.download])
+    }
 }

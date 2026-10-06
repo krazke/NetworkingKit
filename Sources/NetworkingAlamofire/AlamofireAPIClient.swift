@@ -109,19 +109,25 @@ public final class AlamofireAPIClient: APIClientProtocol {
                          to destination: DownloadDestination,
                          progress: ProgressHandler?) async throws -> URL {
         let convertible = adapter(for: endpoint)
-        let target = try destination.resolve()
-        let dest: DownloadRequest.Destination = { _, _ in
-            (target, [.removePreviousFile, .createIntermediateDirectories])
-        }
+        let target = try destination.targetURL()
 
-        do {
-            let request = session.download(convertible, to: dest).validate()
-            if let progress {
-                request.downloadProgress { p in progress(p.fractionCompleted) }
-            }
-            let url = try await request.serializingDownloadedFileURL().value
-            return url
-        } catch {
+        // No `to:` destination: Alamofire moves the file to its destination before `validate()` runs,
+        // so an error response would replace the target. The default destination keeps the file in the
+        // temporary directory, and `moveDownloadedFile` places it only after validation, as the
+        // URLSession transport does.
+        let request = session.download(convertible).validate()
+        if let progress {
+            request.downloadProgress { p in progress(p.fractionCompleted) }
+        }
+        let response = await request.serializingDownloadedFileURL().response
+        // Discards the download when it fails or cannot be placed; a no-op once the file has been moved.
+        defer { if let location = response.fileURL { try? FileManager.default.removeItem(at: location) } }
+
+        switch response.result {
+        case .success(let location):
+            try destination.moveDownloadedFile(at: location, to: target)
+            return target
+        case .failure(let error):
             throw mapError(error)
         }
     }
@@ -146,24 +152,27 @@ public final class AlamofireAPIClient: APIClientProtocol {
                         encoder: configuration.encoderFactory())
     }
 
+    /// Alamofire 5.11 interpolates names and filenames into `Content-Disposition` unescaped,
+    /// so they are escaped here.
     private func appendParts(_ parts: [MultipartPart], to form: MultipartFormData) {
         for part in parts {
+            let name = MultipartDisposition.escapeName(part.name)
             switch part.source {
             case .data(let data):
                 if let filename = part.filename {
                     form.append(data,
-                                withName: part.name,
-                                fileName: filename,
+                                withName: name,
+                                fileName: MultipartDisposition.escapeFilename(filename),
                                 mimeType: part.mimeType ?? "application/octet-stream")
                 } else if let mime = part.mimeType {
-                    form.append(data, withName: part.name, mimeType: mime)
+                    form.append(data, withName: name, mimeType: mime)
                 } else {
-                    form.append(data, withName: part.name)
+                    form.append(data, withName: name)
                 }
             case .fileURL(let url):
                 form.append(url,
-                            withName: part.name,
-                            fileName: part.filename ?? url.lastPathComponent,
+                            withName: name,
+                            fileName: MultipartDisposition.escapeFilename(part.filename ?? url.lastPathComponent),
                             mimeType: part.mimeType ?? "application/octet-stream")
             }
         }

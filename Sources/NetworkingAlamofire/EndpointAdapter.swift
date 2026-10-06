@@ -48,9 +48,7 @@ struct EndpointAdapter: URLRequestConvertible {
             }
 
         case .urlEncoded(let dict):
-            var c = URLComponents()
-            c.queryItems = dict.map { URLQueryItem(name: $0.key, value: $0.value) }
-            request.httpBody = (c.percentEncodedQuery ?? "").data(using: .utf8)
+            request.httpBody = FormURLEncoding.encode(dict)
             if request.value(forHTTPHeaderField: "Content-Type") == nil {
                 request.setValue("application/x-www-form-urlencoded; charset=utf-8",
                                  forHTTPHeaderField: "Content-Type")

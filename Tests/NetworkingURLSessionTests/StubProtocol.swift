@@ -11,11 +11,13 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
 
     nonisolated(unsafe) static var responder: (@Sendable (URLRequest) -> Stub)?
     nonisolated(unsafe) static private(set) var requests: [URLRequest] = []
+    nonisolated(unsafe) static private(set) var bodies: [Data?] = []
     static let queue = DispatchQueue(label: "stub-protocol")
 
     static func reset(responder: (@Sendable (URLRequest) -> Stub)? = nil) {
         queue.sync {
             requests.removeAll()
+            bodies.removeAll()
             self.responder = responder
         }
     }
@@ -24,12 +26,20 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         queue.sync { requests }
     }
 
+    /// Request bodies in the order they arrived. URLProtocol usually receives the body as
+    /// `httpBodyStream` rather than `httpBody`, so it is read in `startLoading`.
+    static var recordedBodies: [Data?] { queue.sync { bodies } }
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
         let req = self.request
-        Self.queue.sync { Self.requests.append(req) }
+        let body = req.httpBody ?? req.httpBodyStream.map(Self.readAll)
+        Self.queue.sync {
+            Self.requests.append(req)
+            Self.bodies.append(body)
+        }
 
         guard let responder = Self.responder else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
@@ -56,6 +66,19 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+
+    private static func readAll(_ stream: InputStream) -> Data {
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
 }
 
 extension URLSessionConfiguration {

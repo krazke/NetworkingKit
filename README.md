@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 59 XCTest cases (Core 27, URLSession 15, WebSocket 5, Alamofire 12). All 59 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
+The suite contains 83 XCTest cases (Core 32, URLSession 25, WebSocket 5, Alamofire 21). All 83 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -293,7 +293,9 @@ let result = try await client.upload(
 )
 ```
 
-The URLSession transport writes the body to a temporary file and uploads it with `URLSession.upload(for:fromFile:delegate:)`. The Alamofire transport uses `MultipartFormData`.
+The URLSession transport writes the body to a temporary file and uploads it with `URLSession.upload(for:fromFile:delegate:)`, and removes the file afterwards, also when writing it fails. The Alamofire transport uses `MultipartFormData`. Both transports escape field names and filenames in `Content-Disposition` as the WHATWG HTML Standard does for multipart/form-data: `"` becomes `%22`, CR `%0D` and LF `%0A`, and a lone CR or LF in a field name is first normalized to CRLF. No other characters are escaped.
+
+`RequestBody.urlEncoded` is serialized by the WHATWG `application/x-www-form-urlencoded` rules in both transports: every byte except ASCII letters, digits and `*-._` is percent-encoded, and a space becomes `+`. Fields are sorted by name.
 
 ## Download
 
@@ -305,7 +307,21 @@ let savedURL = try await client.download(
 )
 ```
 
-`DownloadDestination` has three cases: `.fileURL(URL, removeIfExists: Bool = true)`, `.documents(subpath:)` and `.temporary(filename:)`. Only `.fileURL` removes an existing file before writing. Do not build a destination path from a server-provided filename without sanitizing it.
+`DownloadDestination` has three cases: `.fileURL(URL, removeIfExists: Bool = true)`, `.documents(subpath:)` and `.temporary(filename:)`. Both transports place the file the same way:
+
+| Situation | Result |
+|---|---|
+| No file at the destination | The file is written; missing intermediate directories are created. |
+| A file exists; `.fileURL(url)`, `.documents` or `.temporary` | The existing file is replaced. |
+| A file exists; `.fileURL(url, removeIfExists: false)` | The download fails and the existing file is kept. |
+| A directory exists at the destination | The download fails; the directory is never replaced. |
+| The request fails, including a non-2xx status | The destination is left untouched. |
+
+The file is moved into place only after a 2xx response has been downloaded completely. When it cannot be placed, `download` throws `APIError.transport` wrapping a `CocoaError`; an existing file or directory gives `.fileWriteFileExists`. `DownloadDestination.resolve()` keeps its 1.0 behavior and removes an existing file for `.fileURL(_, removeIfExists: true)` immediately; the transports do not call it.
+
+`download(_:to:)` without `progress` is a convenience overload. Conformers of `APIClientProtocol` must implement `download(_:to:progress:)`.
+
+Do not build a destination path from a server-provided filename without sanitizing it.
 
 ## WebSocket
 
@@ -421,7 +437,6 @@ The package is a prototype. The issues below were confirmed by reading the code;
 
 **URLSession transport**
 - Multipart `upload` and `download` run `adapt` once and never consult `retry`, so 401 refresh and retry do not apply to them. Plain `send`/`sendVoid` are covered.
-- `download` moves the temporary file with `try? moveItem`. If the target exists (always possible for `.documents` and `.temporary`), the move fails silently and the old file is returned.
 - `PinningDelegate` never calls `SecTrustEvaluateWithError`. When a certificate or key matches, expiry, hostname and chain validation are skipped.
 - A pin mismatch cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
 
@@ -430,8 +445,6 @@ The package is a prototype. The issues below were confirmed by reading the code;
 
 **Both transports**
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
-- `.urlEncoded` bodies are built with `URLComponents.percentEncodedQuery`, which leaves `+` unescaped; a value `a+b` reaches the server as `a b`.
-- The `APIClientProtocol` extension declares `download(_:to:progress:)` with the same signature as the requirement and calls itself. A conformer that omits `download` compiles and then recurses forever.
 
 **WebSocket**
 - `connect()` yields `.connected` and resets the attempt counter right after `resume()`, before the handshake completes, so `.connected` can be reported for a socket that never opens.
@@ -441,7 +454,7 @@ The package is a prototype. The issues below were confirmed by reading the code;
 - There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
 
 **Missing**
-- Tests for successful multipart uploads, download, pinning, cancellation, and the Alamofire mapping of decoding and transport errors.
+- Tests for pinning, cancellation, and the Alamofire mapping of decoding and transport errors.
 - `Retry-After` support and proactive refresh (`AuthTokens.isExpired` is unused).
 - Background sessions, reachability (`NWPathMonitor`) and GraphQL are out of scope.
 - No `LICENSE` file and no DocC catalog.

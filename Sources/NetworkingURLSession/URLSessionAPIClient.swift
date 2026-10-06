@@ -73,20 +73,22 @@ public final class URLSessionAPIClient: APIClientProtocol {
                                                      encoder: encoder)
         let request = try await interceptor.adapt(built)
 
-        let target = try destination.resolve()
+        let target = try destination.targetURL()
 
         let observer = ProgressObserver(handler: progress)
         let start = Date()
 
         do {
-            let (tempURL, response) = try await session.download(for: request, delegate: observer)
+            let (location, response) = try await session.download(for: request, delegate: observer)
+            // Discards the download when any step below fails; a no-op once the file has been moved.
+            defer { try? FileManager.default.removeItem(at: location) }
             try Task.checkCancellation()
             try await fireDidReceive(request: request,
                                      response: response,
                                      data: nil,
                                      start: start)
             try validate(response: response, data: nil)
-            try? FileManager.default.moveItem(at: tempURL, to: target)
+            try destination.moveDownloadedFile(at: location, to: target)
             return target
         } catch is CancellationError {
             throw APIError.cancelled
@@ -120,8 +122,9 @@ public final class URLSessionAPIClient: APIClientProtocol {
         let builder = MultipartFormDataBuilder()
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).multipart")
-        _ = try builder.writeBody(parts: parts, to: tempURL)
+        // Declared before writing: a failed write leaves a partial file behind.
         defer { try? FileManager.default.removeItem(at: tempURL) }
+        _ = try builder.writeBody(parts: parts, to: tempURL)
 
         var request = built
         request.setValue(builder.contentType, forHTTPHeaderField: "Content-Type")

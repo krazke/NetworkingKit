@@ -53,9 +53,9 @@ struct MultipartFormDataBuilder {
 
     private func headerData(for part: MultipartPart) -> Data {
         var s = "--\(boundary)\(lineBreak)"
-        s += "Content-Disposition: form-data; name=\"\(part.name)\""
+        s += "Content-Disposition: form-data; name=\"\(MultipartDisposition.escapeName(part.name))\""
         if let filename = part.filename {
-            s += "; filename=\"\(filename)\""
+            s += "; filename=\"\(MultipartDisposition.escapeFilename(filename))\""
         }
         s += lineBreak
         if let mime = part.mimeType {

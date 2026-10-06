@@ -44,9 +44,11 @@ public extension APIClientProtocol {
         try await upload(endpoint, as: type, decoder: nil, progress: progress)
     }
 
+    // Deliberately no `progress: ProgressHandler? = nil` variant: with the requirement's exact signature
+    // it would become a default implementation that calls itself, so a conformer without `download`
+    // would compile and then recurse forever.
     func download(_ endpoint: APIEndpoint,
-                  to destination: DownloadDestination,
-                  progress: ProgressHandler? = nil) async throws -> URL {
-        try await download(endpoint, to: destination, progress: progress)
+                  to destination: DownloadDestination) async throws -> URL {
+        try await download(endpoint, to: destination, progress: nil)
     }
 }
