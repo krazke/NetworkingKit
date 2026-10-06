@@ -439,12 +439,17 @@ The package is a prototype. The issues below were confirmed by reading the code;
 - Multipart `upload` and `download` run `adapt` once and never consult `retry`, so 401 refresh and retry do not apply to them. Plain `send`/`sendVoid` are covered.
 - `PinningDelegate` never calls `SecTrustEvaluateWithError`. When a certificate or key matches, expiry, hostname and chain validation are skipped.
 - A pin mismatch cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
+- When the multipart body cannot be written (for example, a `.file` part points to a missing file), `upload` throws the underlying Foundation error instead of an `APIError`.
 
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
+- `validate()` also checks a non-empty response's `Content-Type` against the request's `Accept`, which `EndpointAdapter` sets to `application/json` unless the endpoint provides one. A `download` of, say, `application/zip`, or a `sendVoid` answered with `text/plain`, fails with `AFError.responseValidationFailed(.unacceptableContentType)`, mapped to `APIError.transport`. The URLSession transport does not check `Content-Type`.
 
 **Both transports**
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
+
+**NetworkingTesting**
+- `MockAPIClient.download` writes through `DownloadDestination.resolve()` and `Data.write(to:)`, so it overwrites an existing file even for `.fileURL(_, removeIfExists: false)` and does not follow the transports' overwrite rules.
 
 **WebSocket**
 - `connect()` yields `.connected` and resets the attempt counter right after `resume()`, before the handshake completes, so `.connected` can be reported for a socket that never opens.
