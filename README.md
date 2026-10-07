@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 155 XCTest cases (Core 32, URLSession 60, WebSocket 5, Alamofire 58). All 155 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
+The suite contains 177 XCTest cases (Core 32, URLSession 71, WebSocket 5, Alamofire 69). All 177 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -252,9 +252,9 @@ Requests with no response (transport errors) and responses with a retryable stat
 | Situation | `retry` called | `response` | `error` |
 |---|---|---|---|
 | Building the request or its multipart body fails, or `adapt` throws | No; the request fails at once with the `APIError` listed under [Errors](#errors) | — | — |
-| Non-2xx status | Yes | The attempt's `HTTPURLResponse` | The `APIError` the request fails with if it is not retried: `.unauthorized`, `.forbidden`, `.notFound`, or `.server` carrying the response body (`nil` for `download`) |
+| Non-2xx status | Yes | The attempt's `HTTPURLResponse` | The `APIError` the request fails with if it is not retried: `.unauthorized`, `.forbidden`, `.notFound`, or `.server` carrying the response body (`nil` when the body is empty, and for `download`) |
 | Transport failure | Yes | `nil`, also when an earlier attempt received a response | The `URLError`; the request fails with `.transport` wrapping it |
-| A failure after sending that only the Alamofire transport produces, such as a failed server trust evaluation or a rejected `Content-Type` | Yes | The attempt's response, if any | The `APIError` the request fails with |
+| A failure after sending that only the Alamofire transport produces, such as a failed server trust evaluation | Yes | The attempt's response, if any | The `APIError` the request fails with |
 | 2xx response, also when its body cannot be decoded | No | — | — |
 | The calling task is cancelled | No | — | — |
 
@@ -282,9 +282,9 @@ Both transports throw only `APIError` and map each failure to the same case:
 | The calling task is cancelled, a request fails with `URLError.cancelled`, or `adapt` throws `CancellationError` | `.cancelled` |
 | A downloaded file cannot be placed at its destination | `.transport` with a `CocoaError` (see [Download](#download)) |
 
-For `send`, `sendVoid` and `upload`, `.server` carries the raw response body in `data`, so the app can decode its API's error format from it; `message` is a human-readable status description whose wording differs between transports. 401, 403 and 404 carry no body, because their cases have no associated values. `download` failures carry no body either.
+For `send`, `sendVoid` and `upload`, `.server` carries the raw response body in `data`, or `nil` when the body is empty, so the app can decode its API's error format from it; `message` is a human-readable status description whose wording differs between transports. 401, 403 and 404 carry no body, because their cases have no associated values. `download` failures carry no body either.
 
-Match on the case rather than on the wrapped error. The `URLError` and `CocoaError` values named above are the same in both transports. Otherwise the wrapped error of `.encoding`, `.decoding` and `.unknown` is an internal wrapper whose description includes the original error, and it differs between transports. Failures that only Alamofire produces become `.transport` with a wrapper around the `AFError`: a failed server trust evaluation (pinning), a `Content-Type` that `validate()` rejects, and a GET request with a body. A pin mismatch in the URLSession transport becomes `.cancelled` (see [known issues](#status--known-issues)).
+Match on the case rather than on the wrapped error. The `URLError` and `CocoaError` values named above are the same in both transports. Otherwise the wrapped error of `.encoding`, `.decoding` and `.unknown` is an internal wrapper whose description includes the original error, and it differs between transports. Failures that only Alamofire produces become `.transport` with a wrapper around the `AFError`: a failed server trust evaluation (pinning) and a GET request with a body. A pin mismatch in the URLSession transport becomes `.cancelled` (see [known issues](#status--known-issues)).
 
 ## SSL pinning
 
@@ -480,11 +480,9 @@ The package is a prototype. The issues below were confirmed by reading the code,
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
 - A failed server trust evaluation reaches `retry` with `response == nil`, so `RetryInterceptor` retries it like a transport error for a method in `retryableMethods`, up to `limit` attempts with backoff, before the request fails with `.transport`. In the URLSession transport a pin mismatch fails at once with `.cancelled`.
-- `sendVoid` fails with `APIError.decoding` when a 2xx response other than 204 or 205 has an empty body: `serializingData()` rejects empty data. The URLSession transport returns normally.
-- `validate()` also checks a non-empty response's `Content-Type` against the request's `Accept`, which `EndpointAdapter` sets to `application/json` unless the endpoint provides one. A `download` of, say, `application/zip`, or a `sendVoid` answered with `text/plain`, fails with `AFError.responseValidationFailed(.unacceptableContentType)`, mapped to `APIError.transport`. The URLSession transport does not check `Content-Type`.
+- A response that is not an `HTTPURLResponse` and has an empty body fails `send`, `sendVoid` and `upload` with `APIError.decoding` instead of `.invalidResponse`: Alamofire's response serializer rejects the empty body (`inputDataNilOrZeroLength`) before `AlamofireAPIClient` checks the response type. The URLSession transport throws `.invalidResponse`, as both transports do when the body is not empty.
 
 **Both transports**
-- For a non-2xx response with an empty body, `APIError.server` carries empty `Data` in the URLSession transport and `nil` in the Alamofire transport, both when it is thrown and when it is passed to `retry`.
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
 
 **NetworkingTesting**

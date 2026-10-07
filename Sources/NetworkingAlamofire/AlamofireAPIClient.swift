@@ -58,6 +58,10 @@ public final class AlamofireAPIClient: APIClientProtocol {
                        eventMonitors: monitors)
     }
 
+    /// The statuses a response is accepted with. Only the status is validated, as in the URLSession transport:
+    /// Alamofire's `validate()` would also reject a non-empty body whose `Content-Type` does not match `Accept`.
+    private static let acceptedStatusCodes = 200..<300
+
     // MARK: - APIClientProtocol
 
     public func send<T: Decodable & Sendable>(_ endpoint: APIEndpoint,
@@ -67,15 +71,16 @@ public final class AlamofireAPIClient: APIClientProtocol {
         let usedDecoder = decoder ?? configuration.decoderFactory()
 
         return try await value(of: session.request(convertible)
-            .validate()
+            .validate(statusCode: Self.acceptedStatusCodes)
             .serializingDecodable(T.self, decoder: usedDecoder))
     }
 
     public func sendVoid(_ endpoint: APIEndpoint) async throws {
         let convertible = adapter(for: endpoint)
+        // Alamofire accepts an empty body only for 204 and 205; the URLSession transport accepts it for any 2xx.
         _ = try await value(of: session.request(convertible)
-            .validate()
-            .serializingData())
+            .validate(statusCode: Self.acceptedStatusCodes)
+            .serializingData(emptyResponseCodes: Set(Self.acceptedStatusCodes)))
     }
 
     public func upload<T: Decodable & Sendable>(_ endpoint: APIEndpoint,
@@ -87,7 +92,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
 
         // Если не multipart — обычный upload через httpBody
         guard case .multipart(let parts) = endpoint.body else {
-            let request = session.request(convertible).validate()
+            let request = session.request(convertible).validate(statusCode: Self.acceptedStatusCodes)
             if let progress {
                 request.uploadProgress { p in progress(p.fractionCompleted) }
             }
@@ -96,7 +101,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
 
         let request = session.upload(multipartFormData: { [self] form in
             self.appendParts(parts, to: form)
-        }, with: convertible).validate()
+        }, with: convertible).validate(statusCode: Self.acceptedStatusCodes)
 
         if let progress {
             request.uploadProgress { p in progress(p.fractionCompleted) }
@@ -111,11 +116,11 @@ public final class AlamofireAPIClient: APIClientProtocol {
         let convertible = adapter(for: endpoint)
         let target = try destination.targetURL()
 
-        // No `to:` destination: Alamofire moves the file to its destination before `validate()` runs,
+        // No `to:` destination: Alamofire moves the file to its destination before validation runs,
         // so an error response would replace the target. The default destination keeps the file in the
         // temporary directory, and `moveDownloadedFile` places it only after validation, as the
         // URLSession transport does.
-        let request = session.download(convertible).validate()
+        let request = session.download(convertible).validate(statusCode: Self.acceptedStatusCodes)
         if let progress {
             request.downloadProgress { p in progress(p.fractionCompleted) }
         }
@@ -125,7 +130,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
 
         switch response.result {
         case .success(let location):
-            // `validate()` checks only HTTP responses, so a non-HTTP response arrives here as a success.
+            // Validation checks only HTTP responses, so a non-HTTP response arrives here as a success.
             guard response.response != nil else { throw APIError.invalidResponse }
             try destination.moveDownloadedFile(at: location, to: target)
             return target
@@ -142,7 +147,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
         let response = await task.response
         switch response.result {
         case .success(let value):
-            // `validate()` checks only HTTP responses, so a non-HTTP response arrives here as a success.
+            // Validation checks only HTTP responses, so a non-HTTP response arrives here as a success.
             guard response.response != nil else { throw APIError.invalidResponse }
             return value
         case .failure(let error):
@@ -202,7 +207,9 @@ public final class AlamofireAPIClient: APIClientProtocol {
         case 403: return .forbidden
         case 404: return .notFound
         case let code? where (400..<600).contains(code):
-            return .server(statusCode: code, data: responseBody, message: af.errorDescription)
+            // An empty body is `nil` in both transports.
+            return .server(statusCode: code, data: responseBody?.isEmpty == false ? responseBody : nil,
+                           message: af.errorDescription)
         default: break
         }
 

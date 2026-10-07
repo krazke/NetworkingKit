@@ -108,4 +108,29 @@ final class URLSessionServerErrorBodyTests: XCTestCase {
             _ = try await client.upload(MultipartEndpoint(), as: Echo.self)
         }
     }
+
+    // MARK: - Empty body
+
+    /// An empty body gives `nil` rather than empty `Data`, so `data` is `nil` exactly when there is nothing to decode.
+    func test_emptyBody_givesNilData() async {
+        StubProtocol.reset { _ in .init(statusCode: 500, data: Data(), headers: [:], delay: 0) }
+        let client = makeClient()
+        let operations: [(String, () async throws -> Void)] = [
+            ("send", { _ = try await client.send(EchoEndpoint(), as: Echo.self) }),
+            ("sendVoid", { try await client.sendVoid(CreateEndpoint()) }),
+            ("upload", { _ = try await client.upload(CreateEndpoint(), as: Echo.self) }),
+            ("multipart upload", { _ = try await client.upload(MultipartEndpoint(), as: Echo.self) }),
+        ]
+        for (name, operation) in operations {
+            do {
+                try await operation()
+                XCTFail("\(name): expected error")
+            } catch APIError.server(let statusCode, let data, _) {
+                XCTAssertEqual(statusCode, 500, name)
+                XCTAssertNil(data, "\(name): \(data.map { "\($0.count) bytes" } ?? "nil")")
+            } catch {
+                XCTFail("\(name): unexpected \(error)")
+            }
+        }
+    }
 }

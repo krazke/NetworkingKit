@@ -24,9 +24,9 @@ public protocol RequestInterceptor: Sendable {
     ///     when an earlier attempt of the same request received a response.
     ///   - error: For a non-2xx status, the `APIError` the request fails with if it is not retried:
     ///     `.unauthorized`, `.forbidden`, `.notFound`, or `.server` carrying the response body (`nil`
-    ///     for `download`). For a transport error, the `URLError`. For a failure after sending that only
-    ///     the Alamofire transport produces, such as a failed server trust evaluation, the `APIError`
-    ///     the request fails with.
+    ///     when the body is empty, and for `download`). For a transport error, the `URLError`. For a
+    ///     failure after sending that only the Alamofire transport produces, such as a failed server
+    ///     trust evaluation, the `APIError` the request fails with.
     ///   - attempt: The number of the failed attempt, starting at 1.
     /// - Returns: `.retry` or `.retryAfter(_:)` to send another attempt; `.doNotRetry` to fail the request.
     func retry(_ request: URLRequest,

@@ -199,6 +199,27 @@ final class AlamofireRetryInputTests: XCTestCase {
         }
     }
 
+    func test_statusFailureWithEmptyBody_passesServerErrorWithNilData() async throws {
+        Self.stub(Self.status(503))
+        let parts: [MultipartPart] = [.data(Data("bytes".utf8), name: "file", filename: "a.bin", mimeType: nil)]
+        let operations: [(String, (APIClientProtocol) async throws -> Void)] = [
+            ("sendVoid", { try await $0.sendVoid(EchoEndpoint()) }),
+            ("multipart upload", { _ = try await $0.upload(MultipartEndpoint(parts: parts), as: Echo.self) }),
+        ]
+        for (name, operation) in operations {
+            let recorder = RetryInputRecorder()
+            do {
+                try await operation(makeClient(recorder, retry: .none))
+                XCTFail("\(name): expected error")
+            } catch {
+                Self.assertServerError(error, statusCode: 503, data: nil)
+            }
+            let calls = await recorder.calls
+            XCTAssertEqual(calls.map(\.statusCode), [503], name)
+            Self.assertServerError(try XCTUnwrap(calls.first, name).error, statusCode: 503, data: nil)
+        }
+    }
+
     func test_401_403_404_passTheirAPIError() async {
         for code in [401, 403, 404] {
             Self.stub(Self.status(code, body: "denied"))

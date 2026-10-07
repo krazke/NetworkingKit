@@ -81,7 +81,8 @@ final class InterceptorBridge: Alamofire.RequestInterceptor {
     ///   body, `adapt`, or Alamofire's request validation) and for a 2xx response whose body cannot be
     ///   serialized. No response and the `URLError` for a transport error, even when the task received
     ///   headers before it failed. Otherwise the attempt's response and the `APIError` the request fails
-    ///   with, which for a non-2xx status carries the response body of a data or upload request.
+    ///   with, which for a non-2xx status carries the response body of a data or upload request (`nil` when
+    ///   the body is empty).
     private static func retryInputs(for error: any Error,
                                     of request: Alamofire.Request) -> (response: HTTPURLResponse?, error: any Error & Sendable)? {
         guard let af = error as? AFError else {

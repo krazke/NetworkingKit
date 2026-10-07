@@ -39,8 +39,6 @@ final class AlamofireDownloadTests: XCTestCase {
         return AlamofireAPIClient(configuration: config)
     }
 
-    /// Responds with `Content-Type: application/json`: Alamofire's `validate()` also checks it
-    /// against the default `Accept: application/json`, which is not what these tests cover.
     private static func stub(status: Int, body: String) {
         StubProtocol.reset { _ in
             .init(statusCode: status, data: Data(body.utf8),
