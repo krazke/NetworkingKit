@@ -31,6 +31,19 @@ private struct ThrowingAdapter: RequestInterceptor {
 
 private struct CustomError: Error {}
 
+/// An upload with a raw body. PUT, because Alamofire rejects a GET request with a body.
+private struct RawUploadEndpoint: APIEndpoint {
+    var path: String { "/files" }
+    var method: HTTPMethod { .put }
+    var body: RequestBody { .raw(Data("bytes".utf8), contentType: "application/octet-stream") }
+}
+
+private struct MultipartUploadEndpoint: APIEndpoint {
+    var path: String { "/files" }
+    var method: HTTPMethod { .put }
+    var body: RequestBody { .multipart([.data(Data("bytes".utf8), name: "file", filename: "a.bin")]) }
+}
+
 /// The error each failure source maps to, checked through the real Alamofire transport.
 /// `URLSessionErrorMappingTests` checks the same mapping for the URLSession transport.
 final class AlamofireErrorMappingTests: XCTestCase {
@@ -68,6 +81,27 @@ final class AlamofireErrorMappingTests: XCTestCase {
 
     private static func json(_ body: String) -> StubProtocol.Stub {
         .init(statusCode: 200, data: Data(body.utf8), headers: ["Content-Type": "application/json"], delay: 0)
+    }
+
+    /// A plain `URLResponse` with `body`, as a non-HTTP URL scheme would return.
+    private static func nonHTTP(_ body: String) -> StubProtocol.Stub {
+        var stub = json(body)
+        stub.isHTTP = false
+        return stub
+    }
+
+    /// Bodies of a non-HTTP response: empty, not decodable as `Echo`, and decodable.
+    private static let nonHTTPBodies = ["", "not json", #"{"value":"ok"}"#]
+
+    private static func assertInvalidResponse(_ operation: () async throws -> Void, _ message: String,
+                                              file: StaticString = #filePath, line: UInt = #line) async {
+        do {
+            try await operation()
+            XCTFail("\(message): expected error", file: file, line: line)
+        } catch APIError.invalidResponse {
+        } catch {
+            XCTFail("\(message): unexpected \(error)", file: file, line: line)
+        }
     }
 
     /// The error inside the transport's box for non-`Sendable` errors.
@@ -207,6 +241,49 @@ final class AlamofireErrorMappingTests: XCTestCase {
         } catch {
             XCTFail("Unexpected: \(error)")
         }
+    }
+
+    /// The response type is checked before the body, so neither an empty nor an undecodable body
+    /// turns a non-HTTP response into `.decoding`.
+    func test_nonHTTPResponse_send_throwsInvalidResponseForAnyBody() async {
+        let client = makeClient()
+        for body in Self.nonHTTPBodies {
+            Self.stub(Self.nonHTTP(body))
+            await Self.assertInvalidResponse({ _ = try await client.send(EchoEndpoint(), as: Echo.self) },
+                                             "body \"\(body)\"")
+        }
+    }
+
+    func test_nonHTTPResponse_sendVoid_throwsInvalidResponseForAnyBody() async {
+        let client = makeClient()
+        for body in Self.nonHTTPBodies {
+            Self.stub(Self.nonHTTP(body))
+            await Self.assertInvalidResponse({ try await client.sendVoid(EchoEndpoint()) }, "body \"\(body)\"")
+        }
+    }
+
+    func test_nonHTTPResponse_upload_throwsInvalidResponseForAnyBody() async {
+        let client = makeClient()
+        let endpoints: [(String, any APIEndpoint)] = [("raw", RawUploadEndpoint()),
+                                                      ("multipart", MultipartUploadEndpoint())]
+        for (name, endpoint) in endpoints {
+            for body in Self.nonHTTPBodies {
+                Self.stub(Self.nonHTTP(body))
+                await Self.assertInvalidResponse({ _ = try await client.upload(endpoint, as: Echo.self) },
+                                                 "\(name), body \"\(body)\"")
+            }
+        }
+    }
+
+    func test_download_nonHTTPEmptyResponse_throwsInvalidResponseAndDiscardsTheFile() async throws {
+        Self.stub(Self.nonHTTP(""))
+        let target = directory.appendingPathComponent("file.bin")
+        let downloadsBefore = try TemporaryFiles.downloads()
+
+        await Self.assertInvalidResponse({ _ = try await makeClient().download(EchoEndpoint(), to: .fileURL(target)) },
+                                         "download")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+        XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
     }
 
     func test_download_nonHTTPResponse_throwsInvalidResponseAndDiscardsTheFile() async throws {

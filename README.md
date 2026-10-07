@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 244 XCTest cases (Core 67, URLSession 87, WebSocket 5, Alamofire 85). All 244 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
+The suite contains 254 XCTest cases (Core 67, URLSession 92, WebSocket 5, Alamofire 90). All 254 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -274,6 +274,7 @@ An interceptor in `additionalInterceptors` that decides to retry runs before `Re
 | Transport failure | Yes | `nil`, also when an earlier attempt received a response | The `URLError`; the request fails with `.transport` wrapping it |
 | A failure after sending that only the Alamofire transport produces, such as a failed server trust evaluation | Yes | The attempt's response, if any | The `APIError` the request fails with |
 | 2xx response, also when its body cannot be decoded | No | — | — |
+| A response that is not an `HTTPURLResponse`, whatever its body | No | — | — |
 | The calling task is cancelled | No | — | — |
 
 Because `response` is `nil` after a transport error, a transport error that follows a 401 refresh does not trigger another refresh, and `RetryInterceptor` treats it as a transport error rather than by the earlier status.
@@ -288,7 +289,7 @@ Both transports throw only `APIError` and map each failure to the same case:
 |---|---|
 | 401, 403, 404 | `.unauthorized`, `.forbidden`, `.notFound` |
 | Any other non-2xx status | `.server(statusCode:data:message:)` |
-| A response that is not an `HTTPURLResponse` | `.invalidResponse` |
+| A response that is not an `HTTPURLResponse`, whatever its body; the response type is checked before the body is decoded | `.invalidResponse` |
 | A `RequestBody.json` value fails to encode | `.encoding` |
 | A multipart body cannot be built, for example because a `.file` part's file does not exist | `.encoding`; a missing file gives `CocoaError.fileReadNoSuchFile` |
 | The endpoint's path and query do not form a URL | `.transport(URLError(.badURL))` |
@@ -499,7 +500,6 @@ The package is a prototype. The issues below were confirmed by reading the code,
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
 - A failed server trust evaluation reaches `retry` with `response == nil`, so `RetryInterceptor` retries it like a transport error for a method in `retryableMethods`, up to `limit` attempts with backoff, before the request fails with `.transport`. In the URLSession transport a pin mismatch fails at once with `.cancelled`.
-- A response that is not an `HTTPURLResponse` and has an empty body fails `send`, `sendVoid` and `upload` with `APIError.decoding` instead of `.invalidResponse`: Alamofire's response serializer rejects the empty body (`inputDataNilOrZeroLength`) before `AlamofireAPIClient` checks the response type. The URLSession transport throws `.invalidResponse`, as both transports do when the body is not empty.
 
 **Both transports**
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.

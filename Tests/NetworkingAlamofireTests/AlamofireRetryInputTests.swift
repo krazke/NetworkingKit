@@ -37,6 +37,13 @@ private struct MultipartEndpoint: APIEndpoint {
     var body: RequestBody { .multipart(parts) }
 }
 
+/// PUT is retryable by default, so a missed check would retry these requests.
+private struct PutEndpoint: APIEndpoint {
+    var body: RequestBody = .empty
+    var path: String { "/items/1" }
+    var method: HTTPMethod { .put }
+}
+
 /// Records what the transport passes to `retry` and always declines, so the chain's
 /// `RetryInterceptor` still makes the decision. Optionally makes `adapt` throw.
 private actor RetryInputRecorder: RequestInterceptor {
@@ -304,6 +311,38 @@ final class AlamofireRetryInputTests: XCTestCase {
         }
         let calls = await recorder.calls
         XCTAssertTrue(calls.isEmpty)
+    }
+
+    /// An empty body is the case in which a response serializer fails in the Alamofire transport.
+    func test_nonHTTPResponse_isNotRetriedAndDoesNotReachRetry() async throws {
+        var nonHTTP = Self.status(200)
+        nonHTTP.isHTTP = false
+        let stub = nonHTTP
+        let parts: [MultipartPart] = [.data(Data("bytes".utf8), name: "file", filename: "a.bin", mimeType: nil)]
+        let raw = PutEndpoint(body: .raw(Data("bytes".utf8), contentType: "application/octet-stream"))
+        let operations: [(String, (APIClientProtocol) async throws -> Void)] = [
+            ("send", { _ = try await $0.send(PutEndpoint(), as: Echo.self) }),
+            ("sendVoid", { try await $0.sendVoid(PutEndpoint()) }),
+            ("raw upload", { _ = try await $0.upload(raw, as: Echo.self) }),
+            ("multipart upload", { _ = try await $0.upload(MultipartEndpoint(parts: parts), as: Echo.self) }),
+            ("download", {
+                _ = try await $0.download(PutEndpoint(), to: .temporary(filename: "NetworkingKitTests-\(UUID().uuidString)"))
+            }),
+        ]
+        for (name, operation) in operations {
+            StubProtocol.reset { _ in stub }
+            let recorder = RetryInputRecorder()
+            do {
+                try await operation(makeClient(recorder))
+                XCTFail("\(name): expected error")
+            } catch APIError.invalidResponse {
+            } catch {
+                XCTFail("\(name): unexpected \(error)")
+            }
+            let calls = await recorder.calls
+            XCTAssertTrue(calls.isEmpty, name)
+            XCTAssertEqual(StubProtocol.recordedRequests.count, 1, name)
+        }
     }
 
     func test_cancellation_doesNotReachRetry() async throws {

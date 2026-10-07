@@ -70,17 +70,16 @@ public final class AlamofireAPIClient: APIClientProtocol {
         let convertible = adapter(for: endpoint)
         let usedDecoder = decoder ?? configuration.decoderFactory()
 
-        return try await value(of: session.request(convertible)
-            .validate(statusCode: Self.acceptedStatusCodes)
-            .serializingDecodable(T.self, decoder: usedDecoder))
+        let request = session.request(convertible).validate(statusCode: Self.acceptedStatusCodes)
+        return try await value(of: request.serializingDecodable(T.self, decoder: usedDecoder), from: request)
     }
 
     public func sendVoid(_ endpoint: APIEndpoint) async throws {
         let convertible = adapter(for: endpoint)
         // Alamofire accepts an empty body only for 204 and 205; the URLSession transport accepts it for any 2xx.
-        _ = try await value(of: session.request(convertible)
-            .validate(statusCode: Self.acceptedStatusCodes)
-            .serializingData(emptyResponseCodes: Set(Self.acceptedStatusCodes)))
+        let request = session.request(convertible).validate(statusCode: Self.acceptedStatusCodes)
+        _ = try await value(of: request.serializingData(emptyResponseCodes: Set(Self.acceptedStatusCodes)),
+                            from: request)
     }
 
     public func upload<T: Decodable & Sendable>(_ endpoint: APIEndpoint,
@@ -96,7 +95,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
             if let progress {
                 request.uploadProgress { p in progress(p.fractionCompleted) }
             }
-            return try await value(of: request.serializingDecodable(T.self, decoder: usedDecoder))
+            return try await value(of: request.serializingDecodable(T.self, decoder: usedDecoder), from: request)
         }
 
         let request = session.upload(multipartFormData: { [self] form in
@@ -107,7 +106,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
             request.uploadProgress { p in progress(p.fractionCompleted) }
         }
 
-        return try await value(of: request.serializingDecodable(T.self, decoder: usedDecoder))
+        return try await value(of: request.serializingDecodable(T.self, decoder: usedDecoder), from: request)
     }
 
     public func download(_ endpoint: APIEndpoint,
@@ -143,12 +142,21 @@ public final class AlamofireAPIClient: APIClientProtocol {
 
     /// Awaits `task` and maps a failure together with the response body.
     /// `DataTask.value` would throw only the `AFError`, which does not carry the body.
-    private func value<Value>(of task: DataTask<Value>) async throws -> Value {
+    ///
+    /// - Parameter request: The request `task` serializes. Its last task's response is checked
+    ///   before the result, because Alamofire exposes only an `HTTPURLResponse`.
+    /// - Throws: `.invalidResponse` for a response that is not an `HTTPURLResponse`, whatever its body,
+    ///   as `URLSessionAPIClient` validates the response before decoding it; `.cancelled` instead when the
+    ///   calling task was cancelled.
+    private func value<Value>(of task: DataTask<Value>, from request: DataRequest) async throws -> Value {
         let response = await task.response
+        // Validation skips a non-HTTP response, and the serializer then fails on an empty or undecodable
+        // body, or succeeds on any other; neither outcome is the request's result.
+        if let received = request.task?.response, !(received is HTTPURLResponse) {
+            throw Task.isCancelled ? APIError.cancelled : APIError.invalidResponse
+        }
         switch response.result {
         case .success(let value):
-            // Validation checks only HTTP responses, so a non-HTTP response arrives here as a success.
-            guard response.response != nil else { throw APIError.invalidResponse }
             return value
         case .failure(let error):
             throw Self.mapError(error, responseBody: response.data, cancelled: Task.isCancelled)
