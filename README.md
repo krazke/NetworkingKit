@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 220 XCTest cases (Core 61, URLSession 78, WebSocket 5, Alamofire 76). All 220 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
+The suite contains 244 XCTest cases (Core 67, URLSession 87, WebSocket 5, Alamofire 85). All 244 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -258,6 +258,12 @@ The backoff delay after failed attempt *n* is `min(maxDelay, baseDelay * 2^(n-1)
 - `limit` and `retryableMethods` still apply. Other statuses ignore the header.
 
 An interceptor in `additionalInterceptors` that decides to retry runs before `RetryInterceptor` and takes precedence over this handling.
+
+**Out-of-range delays.** Both transports check the delay of every `.retryAfter(_:)` decision, whichever interceptor returns it, before they wait:
+
+- A negative delay retries at once, like `0`.
+- A delay that is not finite (`.nan`, `.infinity`, `-.infinity`) or longer than `Int64.max` nanoseconds (about 292 years) is not retried: the request fails with the attempt's error, as for `.doNotRetry`.
+- Any other delay is waited as is. `maxDelay` caps only `RetryInterceptor`'s own decisions, not those of other interceptors.
 
 **What `retry` receives.** Both transports call `RequestInterceptor.retry(_:response:error:attempt:)` with the same inputs, once for each attempt that was sent and failed. `attempt` is the number of the failed attempt, starting at 1.
 
@@ -497,7 +503,6 @@ The package is a prototype. The issues below were confirmed by reading the code,
 
 **Both transports**
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
-- The delay of a `.retryAfter(_:)` decision from any interceptor is used unchecked. A non-finite delay (`.infinity`, `.nan`) crashes the URLSession transport: `Task.sleep(for: .seconds(delay))` traps with "Double value cannot be converted to _Int128". The Alamofire transport schedules the retry at `DispatchTime.now() + delay`, which is `DispatchTime.distantFuture`, so the request never retries and finishes only when cancelled. An interceptor that parses `Retry-After` with `TimeInterval(_:)` turns `Retry-After: inf` into such a delay.
 
 **NetworkingTesting**
 - `MockAPIClient.download` writes through `DownloadDestination.resolve()` and `Data.write(to:)`, so it overwrites an existing file even for `.fileURL(_, removeIfExists: false)` and does not follow the transports' overwrite rules.

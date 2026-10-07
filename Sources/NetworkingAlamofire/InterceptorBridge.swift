@@ -57,7 +57,7 @@ final class InterceptorBridge: Alamofire.RequestInterceptor {
                                             response: inputs.response,
                                             error: inputs.error,
                                             attempt: attempt)
-            switch decision {
+            switch decision.validated {
             case .doNotRetry:
                 box.value(.doNotRetry)
             case .retry:

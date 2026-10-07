@@ -214,7 +214,7 @@ public final class URLSessionAPIClient: APIClientProtocol {
                 throw APIError.unknown(SendableErrorBox(error))
             }
 
-            switch decision {
+            switch decision.validated {
             case .doNotRetry:
                 throw failure
             case .retry:
