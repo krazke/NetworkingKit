@@ -125,6 +125,8 @@ public final class AlamofireAPIClient: APIClientProtocol {
 
         switch response.result {
         case .success(let location):
+            // `validate()` checks only HTTP responses, so a non-HTTP response arrives here as a success.
+            guard response.response != nil else { throw APIError.invalidResponse }
             try destination.moveDownloadedFile(at: location, to: target)
             return target
         case .failure(let error):
@@ -140,6 +142,8 @@ public final class AlamofireAPIClient: APIClientProtocol {
         let response = await task.response
         switch response.result {
         case .success(let value):
+            // `validate()` checks only HTTP responses, so a non-HTTP response arrives here as a success.
+            guard response.response != nil else { throw APIError.invalidResponse }
             return value
         case .failure(let error):
             throw mapError(error, responseBody: response.data, cancelled: Task.isCancelled)
@@ -178,34 +182,56 @@ public final class AlamofireAPIClient: APIClientProtocol {
         }
     }
 
+    /// Maps a failure to the `APIError` that `URLSessionAPIClient` throws for the same cause.
+    ///
+    /// Alamofire wraps an error thrown while building the request (`EndpointAdapter`), by an interceptor's
+    /// `adapt`, or by the session task in an `AFError`. That error is unwrapped and mapped by the rules
+    /// `URLSessionAPIClient` uses: an `APIError` passes through unchanged, a `URLError` becomes `.transport`
+    /// with the `URLError` itself, and `CancellationError` or `URLError.cancelled` becomes `.cancelled`.
+    ///
     /// - Parameter cancelled: Whether the calling task was cancelled. A request cancelled while it waits for a
     ///   retry delay fails with the error of its last attempt, which then becomes `.cancelled`.
     private func mapError(_ error: any Error, responseBody: Data? = nil, cancelled: Bool = false) -> APIError {
         if cancelled { return .cancelled }
-        if let api = error as? APIError { return api }
+        guard let af = error as? AFError else { return Self.mapUnderlying(error) }
+        if af.isExplicitlyCancelledError { return .cancelled }
 
-        if let af = error as? AFError {
-            if af.isExplicitlyCancelledError { return .cancelled }
-            switch af.responseCode {
-            case 401: return .unauthorized
-            case 403: return .forbidden
-            case 404: return .notFound
-            case let code? where (400..<600).contains(code):
-                return .server(statusCode: code, data: responseBody, message: af.errorDescription)
-            default: break
-            }
-            if case .responseSerializationFailed(let reason) = af,
-               case .decodingFailed(let underlying) = reason {
-                return .decoding(NonSendableErrorBox(underlying))
-            }
-            return .transport(NonSendableErrorBox(af))
+        switch af.responseCode {
+        case 401: return .unauthorized
+        case 403: return .forbidden
+        case 404: return .notFound
+        case let code? where (400..<600).contains(code):
+            return .server(statusCode: code, data: responseBody, message: af.errorDescription)
+        default: break
         }
 
+        switch af {
+        case .createURLRequestFailed(error: let underlying),
+             .requestAdaptationFailed(error: let underlying),
+             .sessionTaskFailed(error: let underlying):
+            return mapError(underlying)
+        case .multipartEncodingFailed:
+            // A `.file` part is missing or unreadable, or the body could not be written to disk.
+            if let cocoa = af.underlyingError as? CocoaError { return .encoding(cocoa) }
+            return .encoding(NonSendableErrorBox(af))
+        case .responseSerializationFailed(reason: .decodingFailed(error: let underlying)):
+            return .decoding(NonSendableErrorBox(underlying))
+        case .responseSerializationFailed(reason: .inputDataNilOrZeroLength),
+             .responseSerializationFailed(reason: .invalidEmptyResponse):
+            // An empty 2xx body where a value was expected; `JSONDecoder` rejects it in the URLSession transport.
+            return .decoding(NonSendableErrorBox(af))
+        default:
+            return .transport(NonSendableErrorBox(af))
+        }
+    }
+
+    private static func mapUnderlying(_ error: any Error) -> APIError {
+        if let api = error as? APIError { return api }
+        if error is CancellationError { return .cancelled }
         if let urlError = error as? URLError {
             if urlError.code == .cancelled { return .cancelled }
             return .transport(urlError)
         }
-
         return .unknown(NonSendableErrorBox(error))
     }
 }

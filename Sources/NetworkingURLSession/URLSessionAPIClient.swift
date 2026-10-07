@@ -115,7 +115,14 @@ public final class URLSessionAPIClient: APIClientProtocol {
         // Declared before writing: a failed write leaves a partial file behind.
         // Every attempt uploads this one file; it is removed once, after the last attempt.
         defer { try? FileManager.default.removeItem(at: tempURL) }
-        _ = try builder.writeBody(parts: parts, to: tempURL)
+        do {
+            _ = try builder.writeBody(parts: parts, to: tempURL)
+        } catch let error as CocoaError {
+            // `AlamofireAPIClient` maps Alamofire's `multipartEncodingFailed` the same way.
+            throw APIError.encoding(error)
+        } catch {
+            throw APIError.encoding(SendableErrorBox(error))
+        }
 
         var request = built
         request.setValue(builder.contentType, forHTTPHeaderField: "Content-Type")
@@ -258,8 +265,10 @@ public final class URLSessionAPIClient: APIClientProtocol {
                                          duration: Date().timeIntervalSince(start))
     }
 
+    /// Maps an error thrown by an interceptor's `adapt`. `AlamofireAPIClient.mapError` applies the same rules.
     private func mapError(_ error: any Error) -> APIError {
         if let api = error as? APIError { return api }
+        if error is CancellationError { return .cancelled }
         if let urlError = error as? URLError {
             if urlError.code == .cancelled { return .cancelled }
             return .transport(urlError)

@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 101 XCTest cases (Core 32, URLSession 34, WebSocket 5, Alamofire 30). All 101 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
+The suite contains 130 XCTest cases (Core 32, URLSession 48, WebSocket 5, Alamofire 45). All 130 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -251,9 +251,27 @@ Requests with no response (transport errors) and responses with a retryable stat
 
 ## Errors
 
-Both transports throw `APIError`. A non-2xx response becomes `.unauthorized` (401), `.forbidden` (403), `.notFound` (404), or `.server(statusCode:data:message:)` for any other status. For `send`, `sendVoid` and `upload`, `.server` carries the raw response body in `data`, so the app can decode its API's error format from it; `message` is a human-readable status description whose wording differs between transports.
+Both transports throw only `APIError` and map each failure to the same case:
 
-401, 403 and 404 carry no body, because their cases have no associated values. `download` failures carry no body either.
+| Failure | `APIError` |
+|---|---|
+| 401, 403, 404 | `.unauthorized`, `.forbidden`, `.notFound` |
+| Any other non-2xx status | `.server(statusCode:data:message:)` |
+| A response that is not an `HTTPURLResponse` | `.invalidResponse` |
+| A `RequestBody.json` value fails to encode | `.encoding` |
+| A multipart body cannot be built, for example because a `.file` part's file does not exist | `.encoding`; a missing file gives `CocoaError.fileReadNoSuchFile` |
+| The endpoint's path and query do not form a URL | `.transport(URLError(.badURL))` |
+| The response body does not decode as the requested type, including an empty body | `.decoding` |
+| The request fails with a `URLError`, such as `.notConnectedToInternet` or `.timedOut`, also after the last retry | `.transport` with that `URLError` |
+| An interceptor's `adapt` throws an `APIError` | That `APIError`, unchanged |
+| `adapt` throws a `URLError` | `.transport` with that `URLError` |
+| `adapt` throws any other error | `.unknown` |
+| The calling task is cancelled, a request fails with `URLError.cancelled`, or `adapt` throws `CancellationError` | `.cancelled` |
+| A downloaded file cannot be placed at its destination | `.transport` with a `CocoaError` (see [Download](#download)) |
+
+For `send`, `sendVoid` and `upload`, `.server` carries the raw response body in `data`, so the app can decode its API's error format from it; `message` is a human-readable status description whose wording differs between transports. 401, 403 and 404 carry no body, because their cases have no associated values. `download` failures carry no body either.
+
+Match on the case rather than on the wrapped error. The `URLError` and `CocoaError` values named above are the same in both transports. Otherwise the wrapped error of `.encoding`, `.decoding` and `.unknown` is an internal wrapper whose description includes the original error, and it differs between transports. Failures that only Alamofire produces become `.transport` with a wrapper around the `AFError`: a failed server trust evaluation (pinning), a `Content-Type` that `validate()` rejects, and a GET request with a body. A pin mismatch in the URLSession transport becomes `.cancelled` (see [known issues](#status--known-issues)).
 
 ## SSL pinning
 
@@ -439,20 +457,22 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 
 ## Status & known issues
 
-The package is a prototype. The issues below were confirmed by reading the code; none is covered by a test yet.
+The package is a prototype. The issues below were confirmed by reading the code, some also by a throwaway test; none is covered by a test in the suite yet.
 
 **URLSession transport**
 - After a transport error, `retry` receives the previous attempt's response instead of `nil`. When the previous attempt was the 401 that triggered a refresh, `AuthInterceptor` refreshes again, and `RetryInterceptor` decides by the old status code. The Alamofire transport passes the current attempt's response, which is `nil` after a transport error.
 - A non-multipart `upload` never calls its `ProgressHandler`: the request is sent with `URLSession.data(for:)` without a task delegate. The Alamofire transport registers the handler with `uploadProgress` in this case.
 - `PinningDelegate` never calls `SecTrustEvaluateWithError`. When a certificate or key matches, expiry, hostname and chain validation are skipped.
 - A pin mismatch cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
-- When the multipart body cannot be written (for example, a `.file` part points to a missing file), `upload` throws the underlying Foundation error instead of an `APIError`.
 
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
+- Failures before a request is sent go through the interceptors' `retry`: Alamofire passes an error from building the request, from `adapt` or from building a multipart body to the retrier, and `RetryInterceptor` treats it like a transport error. For a method in `retryableMethods` the request is therefore built and adapted up to `limit` times with backoff before it fails. The URLSession transport throws on the first failure. The thrown `APIError` is the same.
+- `sendVoid` fails with `APIError.decoding` when a 2xx response other than 204 or 205 has an empty body: `serializingData()` rejects empty data. The URLSession transport returns normally.
 - `validate()` also checks a non-empty response's `Content-Type` against the request's `Accept`, which `EndpointAdapter` sets to `application/json` unless the endpoint provides one. A `download` of, say, `application/zip`, or a `sendVoid` answered with `text/plain`, fails with `AFError.responseValidationFailed(.unacceptableContentType)`, mapped to `APIError.transport`. The URLSession transport does not check `Content-Type`.
 
 **Both transports**
+- The `error` passed to `RequestInterceptor.retry` differs. The URLSession transport passes the `APIError` for a non-2xx status and the `URLError` for a transport failure; the Alamofire transport passes an internal wrapper around the `AFError`. The built-in interceptors do not read it.
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
 
 **NetworkingTesting**
@@ -466,7 +486,7 @@ The package is a prototype. The issues below were confirmed by reading the code;
 - There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
 
 **Missing**
-- Tests for pinning, for cancellation outside a retry delay, and for the Alamofire mapping of decoding and transport errors.
+- Tests for pinning, and for cancelling an `upload` or `download` while the request is in flight.
 - `Retry-After` support and proactive refresh (`AuthTokens.isExpired` is unused).
 - Background sessions, reachability (`NWPathMonitor`) and GraphQL are out of scope.
 - No `LICENSE` file and no DocC catalog.

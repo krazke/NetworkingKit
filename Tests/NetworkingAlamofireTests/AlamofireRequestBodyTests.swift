@@ -85,6 +85,25 @@ final class AlamofireRequestBodyTests: XCTestCase {
         XCTAssertTrue(lines.contains("value"))
     }
 
+    func test_multipartUpload_missingFilePart_throwsEncoding() async throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-\(UUID().uuidString).bin")
+        let before = try TemporaryFiles.multipartBodies()
+
+        do {
+            _ = try await makeClient().upload(MultipartEndpoint(parts: [.file(missing, name: "file")]),
+                                              as: Echo.self)
+            XCTFail("Expected error")
+        } catch APIError.encoding(let error) {
+            XCTAssertEqual((error as? CocoaError)?.code, .fileReadNoSuchFile, "\(error)")
+        } catch {
+            XCTFail("Unexpected: \(error)")
+        }
+
+        XCTAssertEqual(try TemporaryFiles.multipartBodies(), before)
+        XCTAssertTrue(StubProtocol.recordedRequests.isEmpty)
+    }
+
     // MARK: - Retry
 
     private static let payload: [MultipartPart] = [.data(Data("payload".utf8), name: "file",

@@ -7,6 +7,14 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         let data: Data
         let headers: [String: String]
         let delay: TimeInterval
+        /// Fails the request with this error instead of responding.
+        var failure: URLError? = nil
+        /// Responds with a plain `URLResponse`, as a non-HTTP URL scheme would.
+        var isHTTP = true
+
+        static func failing(_ code: URLError.Code, delay: TimeInterval = 0) -> Stub {
+            .init(statusCode: 0, data: Data(), headers: [:], delay: delay, failure: URLError(code))
+        }
     }
 
     nonisolated(unsafe) static var responder: (@Sendable (URLRequest) -> Stub)?
@@ -64,10 +72,19 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
 
         let proto = self
         let send: @Sendable () -> Void = {
-            let response = HTTPURLResponse(url: req.url!,
-                                           statusCode: stub.statusCode,
-                                           httpVersion: "HTTP/1.1",
-                                           headerFields: stub.headers)!
+            if let failure = stub.failure {
+                proto.client?.urlProtocol(proto, didFailWithError: failure)
+                return
+            }
+            let response = stub.isHTTP
+                ? HTTPURLResponse(url: req.url!,
+                                  statusCode: stub.statusCode,
+                                  httpVersion: "HTTP/1.1",
+                                  headerFields: stub.headers)!
+                : URLResponse(url: req.url!,
+                              mimeType: stub.headers["Content-Type"],
+                              expectedContentLength: stub.data.count,
+                              textEncodingName: nil)
             proto.client?.urlProtocol(proto, didReceive: response, cacheStoragePolicy: .notAllowed)
             proto.client?.urlProtocol(proto, didLoad: stub.data)
             proto.client?.urlProtocolDidFinishLoading(proto)

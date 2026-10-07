@@ -85,7 +85,7 @@ final class URLSessionRequestBodyTests: XCTestCase {
         XCTAssertTrue(lines.contains("value"))
     }
 
-    func test_multipartUpload_removesTempFileWhenWritingBodyFails() async throws {
+    func test_multipartUpload_missingFilePart_throwsEncodingAndRemovesTempFile() async throws {
         let missing = FileManager.default.temporaryDirectory
             .appendingPathComponent("missing-\(UUID().uuidString).bin")
         let before = try TemporaryFiles.multipartBodies()
@@ -94,8 +94,10 @@ final class URLSessionRequestBodyTests: XCTestCase {
             _ = try await makeClient().upload(MultipartEndpoint(parts: [.file(missing, name: "file")]),
                                               as: Echo.self)
             XCTFail("Expected error")
+        } catch APIError.encoding(let error) {
+            XCTAssertEqual((error as? CocoaError)?.code, .fileReadNoSuchFile, "\(error)")
         } catch {
-            // Any error: the part's file does not exist.
+            XCTFail("Unexpected: \(error)")
         }
 
         XCTAssertEqual(try TemporaryFiles.multipartBodies(), before)

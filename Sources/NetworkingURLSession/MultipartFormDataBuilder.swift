@@ -13,13 +13,14 @@ struct MultipartFormDataBuilder {
 
     var contentType: String { "multipart/form-data; boundary=\(boundary)" }
 
-    /// Возвращает URL временного файла с собранным телом (для streaming upload)
-    /// и общий размер (для прогресса).
+    /// Writes the encoded body to `url` and returns its size in bytes.
+    ///
+    /// - Throws: The Foundation error that stopped the write. A `.file` part whose file does not exist
+    ///   gives `CocoaError.fileReadNoSuchFile`, as Alamofire's `MultipartFormData` reports it.
+    ///   A partially written file may be left at `url`.
     func writeBody(parts: [MultipartPart], to url: URL) throws -> Int64 {
         FileManager.default.createFile(atPath: url.path, contents: nil)
-        guard let handle = try? FileHandle(forWritingTo: url) else {
-            throw APIError.transport(URLError(.cannotCreateFile))
-        }
+        let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
 
         var total: Int64 = 0
@@ -33,6 +34,8 @@ struct MultipartFormDataBuilder {
                 try handle.write(contentsOf: data)
                 total += Int64(data.count)
             case .fileURL(let fileURL):
+                // Throws `.fileReadNoSuchFile` for a missing file; `FileHandle` would throw `.fileNoSuchFile`.
+                _ = try fileURL.checkResourceIsReachable()
                 let read = try FileHandle(forReadingFrom: fileURL)
                 defer { try? read.close() }
                 while let chunk = try read.read(upToCount: 64 * 1024), !chunk.isEmpty {
