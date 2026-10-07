@@ -130,7 +130,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
             try destination.moveDownloadedFile(at: location, to: target)
             return target
         case .failure(let error):
-            throw mapError(error, cancelled: Task.isCancelled)
+            throw Self.mapError(error, cancelled: Task.isCancelled)
         }
     }
 
@@ -146,7 +146,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
             guard response.response != nil else { throw APIError.invalidResponse }
             return value
         case .failure(let error):
-            throw mapError(error, responseBody: response.data, cancelled: Task.isCancelled)
+            throw Self.mapError(error, responseBody: response.data, cancelled: Task.isCancelled)
         }
     }
 
@@ -183,6 +183,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
     }
 
     /// Maps a failure to the `APIError` that `URLSessionAPIClient` throws for the same cause.
+    /// `InterceptorBridge` passes the result to `retry` for a failure that is not a transport error.
     ///
     /// Alamofire wraps an error thrown while building the request (`EndpointAdapter`), by an interceptor's
     /// `adapt`, or by the session task in an `AFError`. That error is unwrapped and mapped by the rules
@@ -191,7 +192,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
     ///
     /// - Parameter cancelled: Whether the calling task was cancelled. A request cancelled while it waits for a
     ///   retry delay fails with the error of its last attempt, which then becomes `.cancelled`.
-    private func mapError(_ error: any Error, responseBody: Data? = nil, cancelled: Bool = false) -> APIError {
+    static func mapError(_ error: any Error, responseBody: Data? = nil, cancelled: Bool = false) -> APIError {
         if cancelled { return .cancelled }
         guard let af = error as? AFError else { return Self.mapUnderlying(error) }
         if af.isExplicitlyCancelledError { return .cancelled }

@@ -1,12 +1,34 @@
 import Foundation
 
-/// Async-first request interceptor. Транспорты бриджуют это в свою цепочку.
+/// Adapts outgoing requests and decides whether a failed attempt is sent again.
+///
+/// `AlamofireAPIClient` and `URLSessionAPIClient` run the same chain and call both methods with the same
+/// inputs, so an interceptor behaves the same with either transport.
 public protocol RequestInterceptor: Sendable {
-    /// Модификация исходящего запроса (заголовки, авторизация, телеметрия).
+    /// Modifies an outgoing request, for example to add headers or authorization.
+    ///
+    /// Called before every attempt, so a retried request is adapted again. When it throws, the request
+    /// fails without calling `retry`.
     func adapt(_ request: URLRequest) async throws -> URLRequest
 
-    /// Решение о повторе после ошибки/неуспешного статуса.
-    /// `attempt` — номер попытки (1-based).
+    /// Decides whether to send another attempt after one failed.
+    ///
+    /// Called once for every attempt that was sent and failed with a non-2xx HTTP status or a transport
+    /// error. Not called when the request fails before it is sent (building the request or its multipart
+    /// body, or `adapt`, throws), when the calling task is cancelled, or after a 2xx response, also when
+    /// its body cannot be decoded.
+    ///
+    /// - Parameters:
+    ///   - request: The adapted request of the failed attempt.
+    ///   - response: The attempt's response for a non-2xx status. `nil` after a transport error, also
+    ///     when an earlier attempt of the same request received a response.
+    ///   - error: For a non-2xx status, the `APIError` the request fails with if it is not retried:
+    ///     `.unauthorized`, `.forbidden`, `.notFound`, or `.server` carrying the response body (`nil`
+    ///     for `download`). For a transport error, the `URLError`. For a failure after sending that only
+    ///     the Alamofire transport produces, such as a failed server trust evaluation, the `APIError`
+    ///     the request fails with.
+    ///   - attempt: The number of the failed attempt, starting at 1.
+    /// - Returns: `.retry` or `.retryAfter(_:)` to send another attempt; `.doNotRetry` to fail the request.
     func retry(_ request: URLRequest,
                response: HTTPURLResponse?,
                error: any Error & Sendable,

@@ -142,6 +142,7 @@ public final class URLSessionAPIClient: APIClientProtocol {
     /// Sends `initial` through the interceptor chain until an attempt succeeds or `retry` declines.
     ///
     /// Every attempt runs `adapt` again, so a retry after a 401 refresh carries the new token.
+    /// `retry` gets the inputs documented on `RequestInterceptor.retry(_:response:error:attempt:)`.
     ///
     /// - Parameters:
     ///   - perform: Sends one adapted request. Called once per attempt.
@@ -156,7 +157,6 @@ public final class URLSessionAPIClient: APIClientProtocol {
                                         responseBody: (Payload) -> Data?,
                                         discard: (Payload) -> Void) async throws -> (Payload, URLResponse) {
         var attempt = 0
-        var lastResponse: HTTPURLResponse?
 
         while true {
             attempt += 1
@@ -191,7 +191,6 @@ public final class URLSessionAPIClient: APIClientProtocol {
                                                    response: http,
                                                    error: failure,
                                                    attempt: attempt)
-                lastResponse = http
             } catch is CancellationError {
                 throw APIError.cancelled
             } catch let urlError as URLError where urlError.code == .cancelled {
@@ -199,8 +198,10 @@ public final class URLSessionAPIClient: APIClientProtocol {
             } catch let urlError as URLError {
                 configuration.logger?.didFail(request, error: urlError)
                 failure = .transport(urlError)
+                // No response: an earlier attempt's response, such as the 401 that triggered a refresh,
+                // would make the chain decide by a status this attempt never received.
                 decision = await interceptor.retry(request,
-                                                   response: lastResponse,
+                                                   response: nil,
                                                    error: urlError,
                                                    attempt: attempt)
             } catch let apiError as APIError {

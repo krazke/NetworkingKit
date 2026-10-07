@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 130 XCTest cases (Core 32, URLSession 48, WebSocket 5, Alamofire 45). All 130 passed on 2026-10-06 with Xcode 27.0 / Swift 6.4.
+The suite contains 155 XCTest cases (Core 32, URLSession 60, WebSocket 5, Alamofire 58). All 155 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -221,7 +221,7 @@ Precedence is endpoint > dynamic > global: `HeadersInterceptor` sets a global or
 
 Both transports build the same chain from `NetworkConfiguration`: `HeadersInterceptor`, then `AuthInterceptor` (only when `refreshAction` is set), then `additionalInterceptors`, then `RetryInterceptor`. The URLSession transport also inserts `LoggingInterceptor` when a logger is configured; the Alamofire transport logs through an internal `EventMonitor` instead. `CompositeInterceptor` runs `adapt` sequentially, and for `retry` the first decision other than `.doNotRetry` wins.
 
-Every request kind goes through this chain in both transports: `send`, `sendVoid`, `upload` (multipart or not) and `download`. Each attempt runs `adapt` again, and after a non-2xx response or a transport error `retry` decides whether to send another attempt. Retries reuse the request body: the URLSession transport writes a multipart body to disk once and uploads that file on every attempt. A failed attempt's downloaded file is deleted and never placed at the destination (see [Download](#download)).
+Every request kind goes through this chain in both transports: `send`, `sendVoid`, `upload` (multipart or not) and `download`. Each attempt runs `adapt` again, and after a non-2xx response or a transport error `retry` decides whether to send another attempt (see **What `retry` receives** below). Retries reuse the request body: the URLSession transport writes a multipart body to disk once and uploads that file on every attempt. A failed attempt's downloaded file is deleted and never placed at the destination (see [Download](#download)).
 
 Cancelling the calling task ends the request with `APIError.cancelled`, also while it waits for a retry delay.
 
@@ -246,6 +246,19 @@ RetryConfiguration(
 ```
 
 Requests with no response (transport errors) and responses with a retryable status are retried only for `retryableMethods`, by default GET, HEAD, PUT and DELETE; a multipart `upload` with POST therefore gets no status or transport retries unless POST is added. The delay is `min(maxDelay, baseDelay * 2^(attempt-1))` multiplied by the jitter factor, so it can exceed `maxDelay` by up to the upper jitter bound. The `Retry-After` header is not read.
+
+**What `retry` receives.** Both transports call `RequestInterceptor.retry(_:response:error:attempt:)` with the same inputs, once for each attempt that was sent and failed. `attempt` is the number of the failed attempt, starting at 1.
+
+| Situation | `retry` called | `response` | `error` |
+|---|---|---|---|
+| Building the request or its multipart body fails, or `adapt` throws | No; the request fails at once with the `APIError` listed under [Errors](#errors) | — | — |
+| Non-2xx status | Yes | The attempt's `HTTPURLResponse` | The `APIError` the request fails with if it is not retried: `.unauthorized`, `.forbidden`, `.notFound`, or `.server` carrying the response body (`nil` for `download`) |
+| Transport failure | Yes | `nil`, also when an earlier attempt received a response | The `URLError`; the request fails with `.transport` wrapping it |
+| A failure after sending that only the Alamofire transport produces, such as a failed server trust evaluation or a rejected `Content-Type` | Yes | The attempt's response, if any | The `APIError` the request fails with |
+| 2xx response, also when its body cannot be decoded | No | — | — |
+| The calling task is cancelled | No | — | — |
+
+Because `response` is `nil` after a transport error, a transport error that follows a 401 refresh does not trigger another refresh, and `RetryInterceptor` treats it as a transport error rather than by the earlier status.
 
 **Progress across retries.** A `ProgressHandler` reports the fraction of the current attempt's request body sent (`upload`) or response body received (`download`). When a request is retried, the values start over near 0, so they can decrease, and a failed attempt may already have reported 1.0. Both transports behave this way. The Alamofire transport calls the handler on the main queue, the URLSession transport on its session's delegate queue.
 
@@ -460,19 +473,18 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 The package is a prototype. The issues below were confirmed by reading the code, some also by a throwaway test; none is covered by a test in the suite yet.
 
 **URLSession transport**
-- After a transport error, `retry` receives the previous attempt's response instead of `nil`. When the previous attempt was the 401 that triggered a refresh, `AuthInterceptor` refreshes again, and `RetryInterceptor` decides by the old status code. The Alamofire transport passes the current attempt's response, which is `nil` after a transport error.
 - A non-multipart `upload` never calls its `ProgressHandler`: the request is sent with `URLSession.data(for:)` without a task delegate. The Alamofire transport registers the handler with `uploadProgress` in this case.
 - `PinningDelegate` never calls `SecTrustEvaluateWithError`. When a certificate or key matches, expiry, hostname and chain validation are skipped.
 - A pin mismatch cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
 
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
-- Failures before a request is sent go through the interceptors' `retry`: Alamofire passes an error from building the request, from `adapt` or from building a multipart body to the retrier, and `RetryInterceptor` treats it like a transport error. For a method in `retryableMethods` the request is therefore built and adapted up to `limit` times with backoff before it fails. The URLSession transport throws on the first failure. The thrown `APIError` is the same.
+- A failed server trust evaluation reaches `retry` with `response == nil`, so `RetryInterceptor` retries it like a transport error for a method in `retryableMethods`, up to `limit` attempts with backoff, before the request fails with `.transport`. In the URLSession transport a pin mismatch fails at once with `.cancelled`.
 - `sendVoid` fails with `APIError.decoding` when a 2xx response other than 204 or 205 has an empty body: `serializingData()` rejects empty data. The URLSession transport returns normally.
 - `validate()` also checks a non-empty response's `Content-Type` against the request's `Accept`, which `EndpointAdapter` sets to `application/json` unless the endpoint provides one. A `download` of, say, `application/zip`, or a `sendVoid` answered with `text/plain`, fails with `AFError.responseValidationFailed(.unacceptableContentType)`, mapped to `APIError.transport`. The URLSession transport does not check `Content-Type`.
 
 **Both transports**
-- The `error` passed to `RequestInterceptor.retry` differs. The URLSession transport passes the `APIError` for a non-2xx status and the `URLError` for a transport failure; the Alamofire transport passes an internal wrapper around the `AFError`. The built-in interceptors do not read it.
+- For a non-2xx response with an empty body, `APIError.server` carries empty `Data` in the URLSession transport and `nil` in the Alamofire transport, both when it is thrown and when it is passed to `retry`.
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
 
 **NetworkingTesting**

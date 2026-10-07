@@ -169,6 +169,30 @@ final class AlamofireAuthRefreshTests: XCTestCase {
             XCTFail("Unexpected: \(error)")
         }
         XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+        let refreshCount = await server.refreshCount
+        XCTAssertEqual(refreshCount, 1)
+    }
+
+    func test_transportErrorAfter401Refresh_doesNotRefreshAgain() async {
+        let attempts = LockedCounter()
+        StubProtocol.reset { request in
+            attempts.increment() == 1 ? Self.respond(to: request, validToken: "access-1") : .failing(.timedOut)
+        }
+        let server = RotatingAuthServer()
+        let client = makeClient(server: server, store: MockTokenStore(initial: Self.initialTokens))
+
+        do {
+            _ = try await client.send(EchoEndpoint(), as: Echo.self)
+            XCTFail("Expected error")
+        } catch APIError.transport(let error) {
+            XCTAssertEqual((error as? URLError)?.code, .timedOut, "\(error)")
+        } catch {
+            XCTFail("Unexpected: \(error)")
+        }
+        XCTAssertEqual(StubProtocol.recordedRequests.map { $0.value(forHTTPHeaderField: "Authorization") },
+                       ["Bearer access-0", "Bearer access-1"])
+        let refreshCount = await server.refreshCount
+        XCTAssertEqual(refreshCount, 1)
     }
 }
 
