@@ -504,6 +504,9 @@ The package is a prototype. The issues below were confirmed by reading the code,
 **Both transports**
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
 
+**NetworkingCore**
+- `RetryConfiguration` does not validate its fields. A `jitter` range with an infinite bound makes `delay(for:)` trap ("There is no uniform distribution on an infinite range" from `Double.random(in:)`), so the first failure that `RetryInterceptor` would retry with backoff crashes either transport. A `maxDelay` of `.nan` makes every backoff delay NaN, because `min(.nan, x)` is NaN; the transports then do not retry, so transport errors and retryable statuses without `Retry-After` silently get no retries.
+
 **NetworkingTesting**
 - `MockAPIClient.download` writes through `DownloadDestination.resolve()` and `Data.write(to:)`, so it overwrites an existing file even for `.fileURL(_, removeIfExists: false)` and does not follow the transports' overwrite rules.
 
