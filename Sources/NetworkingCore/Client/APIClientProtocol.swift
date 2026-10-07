@@ -16,7 +16,8 @@ public protocol APIClientProtocol: Sendable {
     /// Запрос без ожидания тела ответа (status-only).
     func sendVoid(_ endpoint: APIEndpoint) async throws
 
-    /// Multipart upload с прогрессом.
+    /// Sends the endpoint's body, multipart or any other, reporting its progress, and decodes the response into `T`.
+    /// `decoder == nil` uses the configuration's decoder.
     func upload<T: Decodable & Sendable>(
         _ endpoint: APIEndpoint,
         as type: T.Type,

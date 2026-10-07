@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 212 XCTest cases (Core 61, URLSession 74, WebSocket 5, Alamofire 72). All 212 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
+The suite contains 220 XCTest cases (Core 61, URLSession 78, WebSocket 5, Alamofire 76). All 220 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -344,6 +344,8 @@ let result = try await client.upload(
 
 The URLSession transport writes the body to a temporary file once, uploads that file with `URLSession.upload(for:fromFile:delegate:)` on every attempt, and removes it after the last attempt, also when writing it fails. The Alamofire transport uses `MultipartFormData`. Both transports escape field names and filenames in `Content-Disposition` as the WHATWG HTML Standard does for multipart/form-data: `"` becomes `%22`, CR `%0D` and LF `%0A`, and a lone CR or LF in a field name is first normalized to CRLF. No other characters are escaped.
 
+`upload` also accepts any other `RequestBody`. That body is sent as `send` sends it: in `httpBody`, with `URLSession.data(for:delegate:)` in the URLSession transport and as an Alamofire `DataRequest`. Both transports report its progress to the `ProgressHandler` as they do for multipart; a request without a body reports none.
+
 `RequestBody.urlEncoded` is serialized by the WHATWG `application/x-www-form-urlencoded` rules in both transports: every byte except ASCII letters, digits and `*-._` is percent-encoded, and a space becomes `+`. Fields are sorted by name.
 
 ## Download
@@ -485,7 +487,6 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 The package is a prototype. The issues below were confirmed by reading the code, some also by a throwaway test; none is covered by a test in the suite yet.
 
 **URLSession transport**
-- A non-multipart `upload` never calls its `ProgressHandler`: the request is sent with `URLSession.data(for:)` without a task delegate. The Alamofire transport registers the handler with `uploadProgress` in this case.
 - `PinningDelegate` never calls `SecTrustEvaluateWithError`. When a certificate or key matches, expiry, hostname and chain validation are skipped.
 - A pin mismatch cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
 
@@ -509,7 +510,8 @@ The package is a prototype. The issues below were confirmed by reading the code,
 - There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
 
 **Missing**
-- Tests for pinning, and for cancelling an `upload` or `download` while the request is in flight.
+- Tests for pinning, and for cancelling a multipart `upload` or a `download` while the request is in flight.
+- An end-to-end test of upload progress. URLSession does not call `didSendBodyData` for a request served by a `URLProtocol`, so the progress tests have `StubProtocol` call the task's delegate (URLSession transport) or `Session.delegate` (Alamofire transport) instead; they do not cover the callbacks URLSession makes over a real connection, or the queue the handler runs on.
 - Proactive refresh (`AuthTokens.isExpired` is unused).
 - Background sessions, reachability (`NWPathMonitor`) and GraphQL are out of scope.
 - No `LICENSE` file and no DocC catalog.

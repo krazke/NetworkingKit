@@ -105,8 +105,12 @@ public final class URLSessionAPIClient: APIClientProtocol {
                                                          encoder: encoder)
 
         guard let parts else {
-            // Не multipart — обычный upload через body
-            return try await sendWithRetry(initial: built) { try await self.session.data(for: $0) }
+            // The body stays in `httpBody`, as for `send`; the task delegate reports it being sent.
+            // URLSession calls `didSendBodyData` for a data task with a body as it does for an upload task.
+            let observer = ProgressObserver(handler: progress)
+            return try await sendWithRetry(initial: built) {
+                try await self.session.data(for: $0, delegate: observer)
+            }
         }
 
         let builder = MultipartFormDataBuilder()

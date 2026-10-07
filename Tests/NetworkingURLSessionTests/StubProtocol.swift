@@ -11,6 +11,11 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         var failure: URLError? = nil
         /// Responds with a plain `URLResponse`, as a non-HTTP URL scheme would.
         var isHTTP = true
+        /// Fractions of the request body reported as sent, in order, before the response.
+        /// URLSession does not call `didSendBodyData` for a request served by a URLProtocol, so the stub
+        /// calls it on the task's own delegate, the one passed to `data(for:delegate:)` or `upload(for:…delegate:)`.
+        /// Nothing is reported for a request without a body or a task without a delegate.
+        var sentBodyFractions: [Double] = []
 
         static func failing(_ code: URLError.Code, delay: TimeInterval = 0) -> Stub {
             .init(statusCode: 0, data: Data(), headers: [:], delay: delay, failure: URLError(code))
@@ -69,9 +74,12 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         let stub = responder(req)
+        reportSentBody(stub.sentBodyFractions, length: body?.count ?? 0)
 
         let proto = self
         let send: @Sendable () -> Void = {
+            // A cancelled task has already stopped loading; a delayed response must not reach it.
+            guard !proto.isStopped else { return }
             if let failure = stub.failure {
                 proto.client?.urlProtocol(proto, didFailWithError: failure)
                 return
@@ -97,7 +105,27 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        stateLock.withLock { stopped = true }
+    }
+
+    private let stateLock = NSLock()
+    private var stopped = false
+    private var isStopped: Bool { stateLock.withLock { stopped } }
+
+    private func reportSentBody(_ fractions: [Double], length: Int) {
+        guard length > 0, let task,
+              let delegate = task.delegate as? URLSessionTaskDelegate else { return }
+        let expected = Int64(length)
+        var previous: Int64 = 0
+        for fraction in fractions {
+            let sent = Int64(Double(expected) * fraction)
+            // The session argument is unused by the package's delegates; the stub has no access to the real one.
+            delegate.urlSession?(URLSession.shared, task: task, didSendBodyData: sent - previous,
+                                 totalBytesSent: sent, totalBytesExpectedToSend: expected)
+            previous = sent
+        }
+    }
 
     private static func readAll(_ stream: InputStream) -> Data {
         stream.open()

@@ -10,6 +10,10 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         var failure: URLError? = nil
         /// Responds with a plain `URLResponse`, as a non-HTTP URL scheme would.
         var isHTTP = true
+        /// Fractions of the request body reported as sent, in order, before the response, through
+        /// `sentBodyReporter`. URLSession does not call `didSendBodyData` for a request served by a URLProtocol.
+        /// Nothing is reported for a request without a body.
+        var sentBodyFractions: [Double] = []
 
         static func failing(_ code: URLError.Code, delay: TimeInterval = 0) -> Stub {
             .init(statusCode: 0, data: Data(), headers: [:], delay: delay, failure: URLError(code))
@@ -21,11 +25,19 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static private(set) var bodies: [Data?] = []
     static let queue = DispatchQueue(label: "stub-protocol-af")
 
-    static func reset(responder: (@Sendable (URLRequest) -> Stub)? = nil) {
+    /// Delivers `didSendBodyData` for `Stub.sentBodyFractions`: the task, bytes sent, total bytes sent,
+    /// and total bytes expected to send. Alamofire handles task events in its `SessionDelegate`, which a
+    /// URLProtocol cannot reach, so a test that checks progress provides the delivery.
+    typealias SentBodyReporter = @Sendable (URLSessionTask, Int64, Int64, Int64) -> Void
+    nonisolated(unsafe) static private var reporter: SentBodyReporter?
+
+    static func reset(responder: (@Sendable (URLRequest) -> Stub)? = nil,
+                      sentBodyReporter: SentBodyReporter? = nil) {
         queue.sync {
             requests.removeAll()
             bodies.removeAll()
             self.responder = responder
+            self.reporter = sentBodyReporter
         }
     }
 
@@ -66,8 +78,12 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         let stub = responder(req)
+        reportSentBody(stub.sentBodyFractions, length: body?.count ?? 0)
+
         let proto = self
         let send: @Sendable () -> Void = {
+            // A cancelled task has already stopped loading; a delayed response must not reach it.
+            guard !proto.isStopped else { return }
             if let failure = stub.failure {
                 proto.client?.urlProtocol(proto, didFailWithError: failure)
                 return
@@ -92,7 +108,24 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        stateLock.withLock { stopped = true }
+    }
+
+    private let stateLock = NSLock()
+    private var stopped = false
+    private var isStopped: Bool { stateLock.withLock { stopped } }
+
+    private func reportSentBody(_ fractions: [Double], length: Int) {
+        guard length > 0, let task, let reporter = Self.queue.sync(execute: { Self.reporter }) else { return }
+        let expected = Int64(length)
+        var previous: Int64 = 0
+        for fraction in fractions {
+            let sent = Int64(Double(expected) * fraction)
+            reporter(task, sent - previous, sent, expected)
+            previous = sent
+        }
+    }
 
     private static func readAll(_ stream: InputStream) -> Data {
         stream.open()
