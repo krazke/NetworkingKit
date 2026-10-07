@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 177 XCTest cases (Core 32, URLSession 71, WebSocket 5, Alamofire 69). All 177 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
+The suite contains 212 XCTest cases (Core 61, URLSession 74, WebSocket 5, Alamofire 72). All 212 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -245,7 +245,19 @@ RetryConfiguration(
 )
 ```
 
-Requests with no response (transport errors) and responses with a retryable status are retried only for `retryableMethods`, by default GET, HEAD, PUT and DELETE; a multipart `upload` with POST therefore gets no status or transport retries unless POST is added. The delay is `min(maxDelay, baseDelay * 2^(attempt-1))` multiplied by the jitter factor, so it can exceed `maxDelay` by up to the upper jitter bound. The `Retry-After` header is not read.
+Requests with no response (transport errors) and responses with a retryable status are retried only for `retryableMethods`, by default GET, HEAD, PUT and DELETE; a multipart `upload` with POST therefore gets no status or transport retries unless POST is added. `limit` counts every attempt, the first one included: the default `3` sends a request at most three times, and `0` or `1` disable retries.
+
+The backoff delay after failed attempt *n* is `min(maxDelay, baseDelay * 2^(n-1) * factor)`, with `factor` drawn at random from `jitter` for every retry. Jitter is applied before the cap, so the delay never exceeds `maxDelay`.
+
+**`Retry-After`.** For a 429 or 503 response whose status is in `retryableStatusCodes`, a valid `Retry-After` header replaces the backoff:
+
+- The value is delta-seconds (`Retry-After: 120`) or an HTTP-date in any of the three formats of RFC 9110 §5.6.7: IMF-fixdate, RFC 850 or asctime. A date is measured from the response's `Date` header, so a skewed device clock does not change the wait, or from the local clock when `Date` is missing or invalid.
+- The wait is used as is, without jitter. `0` or a date in the past retries at once.
+- A wait longer than `maxDelay` is not retried: the request fails with the response's error, because retrying before the server's time would most likely fail again.
+- An invalid value is ignored and the backoff applies: a sign, fraction or exponent (`-5`, `1.5`, `1e3`), several values joined by commas, or a date in another format.
+- `limit` and `retryableMethods` still apply. Other statuses ignore the header.
+
+An interceptor in `additionalInterceptors` that decides to retry runs before `RetryInterceptor` and takes precedence over this handling.
 
 **What `retry` receives.** Both transports call `RequestInterceptor.retry(_:response:error:attempt:)` with the same inputs, once for each attempt that was sent and failed. `attempt` is the number of the failed attempt, starting at 1.
 
@@ -484,6 +496,7 @@ The package is a prototype. The issues below were confirmed by reading the code,
 
 **Both transports**
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
+- The delay of a `.retryAfter(_:)` decision from any interceptor is used unchecked. A non-finite delay (`.infinity`, `.nan`) crashes the URLSession transport: `Task.sleep(for: .seconds(delay))` traps with "Double value cannot be converted to _Int128". The Alamofire transport schedules the retry at `DispatchTime.now() + delay`, which is `DispatchTime.distantFuture`, so the request never retries and finishes only when cancelled. An interceptor that parses `Retry-After` with `TimeInterval(_:)` turns `Retry-After: inf` into such a delay.
 
 **NetworkingTesting**
 - `MockAPIClient.download` writes through `DownloadDestination.resolve()` and `Data.write(to:)`, so it overwrites an existing file even for `.fileURL(_, removeIfExists: false)` and does not follow the transports' overwrite rules.
@@ -497,6 +510,6 @@ The package is a prototype. The issues below were confirmed by reading the code,
 
 **Missing**
 - Tests for pinning, and for cancelling an `upload` or `download` while the request is in flight.
-- `Retry-After` support and proactive refresh (`AuthTokens.isExpired` is unused).
+- Proactive refresh (`AuthTokens.isExpired` is unused).
 - Background sessions, reachability (`NWPathMonitor`) and GraphQL are out of scope.
 - No `LICENSE` file and no DocC catalog.

@@ -21,6 +21,37 @@ final class RetryConfigurationTests: XCTestCase {
         XCTAssertEqual(config.delay(for: 10), 5.0, accuracy: 0.001)
     }
 
+    func test_delay_jitterIsAppliedBeforeMaxDelayCap() {
+        let config = RetryConfiguration(limit: 3,
+                                        baseDelay: 10,
+                                        maxDelay: 15,
+                                        jitter: 2.0...2.0)
+        XCTAssertEqual(config.delay(for: 1), 15.0, accuracy: 0.001)
+    }
+
+    func test_delay_neverExceedsMaxDelay() {
+        let config = RetryConfiguration(limit: 10,
+                                        baseDelay: 1,
+                                        maxDelay: 5,
+                                        jitter: 0.8...1.2)
+        var longest: TimeInterval = 0
+        for attempt in 1...10 {
+            for _ in 0..<20 {
+                longest = max(longest, config.delay(for: attempt))
+            }
+        }
+        XCTAssertLessThanOrEqual(longest, 5.0)
+    }
+
+    func test_delay_zeroJitterIsZeroAtAnyAttempt() {
+        // 2^(attempt-1) overflows to infinity here; infinity times 0 must not become the cap.
+        let config = RetryConfiguration(limit: 3_000,
+                                        baseDelay: 1,
+                                        maxDelay: 30,
+                                        jitter: 0.0...0.0)
+        XCTAssertEqual(config.delay(for: 2_000), 0)
+    }
+
     func test_delay_jitterBounds() {
         let config = RetryConfiguration(limit: 3,
                                         baseDelay: 10,

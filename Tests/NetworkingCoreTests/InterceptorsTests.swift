@@ -43,6 +43,24 @@ final class InterceptorsTests: XCTestCase {
         XCTFail("Expected .doNotRetry on attempt == limit, got \(decision)")
     }
 
+    func test_retryInterceptor_limitCountsTotalAttempts() async {
+        let req = URLRequest(url: URL(string: "https://example.com")!)
+        let resp = HTTPURLResponse(url: req.url!, statusCode: 503,
+                                   httpVersion: nil, headerFields: nil)
+        let cases: [(limit: Int, retriedAttempts: [Int])] = [(0, []), (1, []), (2, [1]), (3, [1, 2])]
+        for (limit, expected) in cases {
+            let r = RetryInterceptor(configuration: RetryConfiguration(limit: limit, jitter: 1.0...1.0))
+            var retried: [Int] = []
+            for attempt in 1...4 {
+                let decision = await r.retry(req, response: resp,
+                                             error: URLError(.timedOut), attempt: attempt)
+                if case .doNotRetry = decision { continue }
+                retried.append(attempt)
+            }
+            XCTAssertEqual(retried, expected, "limit \(limit)")
+        }
+    }
+
     func test_retryInterceptor_retriesOn503() async {
         let r = RetryInterceptor(configuration: RetryConfiguration(limit: 3,
                                                                    baseDelay: 0.01,
