@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 254 XCTest cases (Core 67, URLSession 92, WebSocket 5, Alamofire 90). All 254 passed on 2026-10-07 with Xcode 27.0 / Swift 6.4.
+The suite contains 275 XCTest cases (Core 67, URLSession 103, WebSocket 5, Alamofire 100). All 275 passed on 2026-10-08 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -303,7 +303,7 @@ Both transports throw only `APIError` and map each failure to the same case:
 
 For `send`, `sendVoid` and `upload`, `.server` carries the raw response body in `data`, or `nil` when the body is empty, so the app can decode its API's error format from it; `message` is a human-readable status description whose wording differs between transports. 401, 403 and 404 carry no body, because their cases have no associated values. `download` failures carry no body either.
 
-Match on the case rather than on the wrapped error. The `URLError` and `CocoaError` values named above are the same in both transports. Otherwise the wrapped error of `.encoding`, `.decoding` and `.unknown` is an internal wrapper whose description includes the original error, and it differs between transports. Failures that only Alamofire produces become `.transport` with a wrapper around the `AFError`: a failed server trust evaluation (pinning) and a GET request with a body. A pin mismatch in the URLSession transport becomes `.cancelled` (see [known issues](#status--known-issues)).
+Match on the case rather than on the wrapped error. The `URLError` and `CocoaError` values named above are the same in both transports. Otherwise the wrapped error of `.encoding`, `.decoding` and `.unknown` is an internal wrapper whose description includes the original error, and it differs between transports. Failures that only Alamofire produces become `.transport` with a wrapper around the `AFError`: a failed server trust evaluation (pinning) and a GET request with a body. In the URLSession transport a pinned host whose trust the system rejects, or whose chain matches no pin, becomes `.cancelled` (see [known issues](#status--known-issues)).
 
 ## SSL pinning
 
@@ -319,8 +319,10 @@ NetworkConfiguration(
 
 `PinningPolicy` takes DER-encoded certificates for both modes; `.publicKeys` extracts the keys from them.
 
-- `NetworkingAlamofire` maps the policies onto `ServerTrustManager` with `PinnedCertificatesTrustEvaluator` / `PublicKeysTrustEvaluator`. Alamofire's evaluators also perform default system validation.
-- `NetworkingURLSession` uses an internal `URLSessionDelegate` that compares certificates or keys from the presented chain.
+Pinning adds to the system's trust evaluation; it does not replace it. For a pinned host both transports first evaluate the server trust as the system would without pinning, checking expiry, the host name and the chain to a trusted root, and then require a certificate or key from the chain to match a pin. A certificate that the system does not trust, such as a self-signed one or one issued by a private CA the device does not trust, fails even when it is pinned.
+
+- `NetworkingAlamofire` maps the policies onto `ServerTrustManager` with `PinnedCertificatesTrustEvaluator` / `PublicKeysTrustEvaluator` and their default settings (default and host validation on, self-signed certificates not accepted).
+- `NetworkingURLSession` uses an internal `URLSessionDelegate` that calls `SecTrustEvaluateWithError` on the trust URLSession presents and then compares certificates or keys from the evaluated chain. Before 1.0.12 it skipped the evaluation, so a matching pin also accepted an expired certificate, a certificate for another host or an untrusted chain.
 
 Pinning applies to the HTTP clients only. `WebSocketConfiguration` has no pinning option. Both implementations have behavioral gaps listed under known issues.
 
@@ -494,12 +496,11 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 The package is a prototype. The issues below were confirmed by reading the code, some also by a throwaway test; none is covered by a test in the suite yet.
 
 **URLSession transport**
-- `PinningDelegate` never calls `SecTrustEvaluateWithError`. When a certificate or key matches, expiry, hostname and chain validation are skipped.
-- A pin mismatch cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
+- A failed trust evaluation or a pin mismatch for a pinned host cancels the challenge, which surfaces as `URLError.cancelled` and is mapped to `APIError.cancelled` instead of a distinct pinning error.
 
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
-- A failed server trust evaluation reaches `retry` with `response == nil`, so `RetryInterceptor` retries it like a transport error for a method in `retryableMethods`, up to `limit` attempts with backoff, before the request fails with `.transport`. In the URLSession transport a pin mismatch fails at once with `.cancelled`.
+- A failed server trust evaluation reaches `retry` with `response == nil`, so `RetryInterceptor` retries it like a transport error for a method in `retryableMethods`, up to `limit` attempts with backoff, before the request fails with `.transport`. In the URLSession transport a failed trust evaluation or a pin mismatch fails at once with `.cancelled`.
 
 **Both transports**
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
@@ -518,7 +519,8 @@ The package is a prototype. The issues below were confirmed by reading the code,
 - There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
 
 **Missing**
-- Tests for pinning, and for cancelling a multipart `upload` or a `download` while the request is in flight.
+- An end-to-end pinning test. `StubProtocol` raises no server trust challenge, so the pinning tests evaluate a constructed `SecTrust` with `PinningDelegate` and with the evaluators `ServerTrustFactory` builds; they do not cover a TLS connection, the `APIError` a rejected challenge becomes, or what reaches `retry`.
+- Tests for cancelling a multipart `upload` or a `download` while the request is in flight.
 - An end-to-end test of upload progress. URLSession does not call `didSendBodyData` for a request served by a `URLProtocol`, so the progress tests have `StubProtocol` call the task's delegate (URLSession transport) or `Session.delegate` (Alamofire transport) instead; they do not cover the callbacks URLSession makes over a real connection, or the queue the handler runs on.
 - Proactive refresh (`AuthTokens.isExpired` is unused).
 - Background sessions, reachability (`NWPathMonitor`) and GraphQL are out of scope.

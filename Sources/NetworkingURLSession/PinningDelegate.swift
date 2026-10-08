@@ -2,7 +2,12 @@ import Foundation
 import Security
 import NetworkingCore
 
-/// URLSessionDelegate, валидирующий server trust по `PinningPolicy`.
+/// Answers server trust challenges according to `PinningPolicy`.
+///
+/// For a pinned host the system first evaluates the trust as URLSession presents it, so expiry, the host name
+/// and the chain to a trusted root are checked as with default handling; only then are the pins compared with
+/// the evaluated chain. A failure of either cancels the challenge, which fails the task with `URLError.cancelled`.
+/// An unpinned host gets default handling.
 final class PinningDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let pinning: [String: PinningPolicy]
 
@@ -25,17 +30,27 @@ final class PinningDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegat
             completionHandler(.performDefaultHandling, nil)
 
         case .certificates(let pinned):
-            guard validateCertificates(trust: trust, pinned: pinned) else {
+            guard evaluate(trust), validateCertificates(trust: trust, pinned: pinned) else {
                 return completionHandler(.cancelAuthenticationChallenge, nil)
             }
             completionHandler(.useCredential, URLCredential(trust: trust))
 
         case .publicKeys(let pinned):
-            guard validatePublicKeys(trust: trust, pinned: pinned) else {
+            guard evaluate(trust), validatePublicKeys(trust: trust, pinned: pinned) else {
                 return completionHandler(.cancelAuthenticationChallenge, nil)
             }
             completionHandler(.useCredential, URLCredential(trust: trust))
         }
+    }
+
+    /// Whether the system trusts `trust`. A pin match alone must not accept the connection: answering
+    /// `.useCredential` skips URLSession's own evaluation.
+    ///
+    /// The trust keeps the policies URLSession set, including the SSL policy for the challenge's host.
+    /// Evaluation can block on network fetches (revocation, missing intermediates); it runs on the session's
+    /// delegate queue, never on the main thread.
+    private func evaluate(_ trust: SecTrust) -> Bool {
+        SecTrustEvaluateWithError(trust, nil)
     }
 
     private func validateCertificates(trust: SecTrust, pinned: [Data]) -> Bool {
