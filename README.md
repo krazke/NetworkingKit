@@ -501,6 +501,7 @@ The package is a prototype. The issues below were confirmed by reading the code,
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
 - A failed server trust evaluation reaches `retry` with `response == nil`, so `RetryInterceptor` retries it like a transport error for a method in `retryableMethods`, up to `limit` attempts with backoff, before the request fails with `.transport`. In the URLSession transport a failed trust evaluation or a pin mismatch fails at once with `.cancelled`.
+- `ServerTrustFactory` skips a host whose `.certificates` or `.publicKeys` list is empty or holds no DER certificate it can parse (`ServerTrustFactory.swift`). When that is the only pinned host, `makeManager` returns `nil` and the session has no `ServerTrustManager`, so the host silently gets default validation without pinning; with another pinned host it fails with `noRequiredEvaluator` instead. The URLSession transport rejects such a host, because no pin can match.
 
 **Both transports**
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
