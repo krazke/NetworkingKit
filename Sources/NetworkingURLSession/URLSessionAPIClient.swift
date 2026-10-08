@@ -6,7 +6,8 @@ public final class URLSessionAPIClient: APIClientProtocol {
     private let configuration: NetworkConfiguration
     private let session: URLSession
     private let interceptor: CompositeInterceptor
-    private let pinningDelegate: PinningDelegate?
+    /// `nil` when no host is pinned. Internal so that tests can answer a server trust challenge with it.
+    let pinningDelegate: PinningDelegate?
 
     public init(configuration: NetworkConfiguration) {
         self.configuration = configuration
@@ -155,7 +156,8 @@ public final class URLSessionAPIClient: APIClientProtocol {
     ///   - discard: Releases the payload of an attempt that is not returned, such as a downloaded file.
     ///     Called once for every failed or retried attempt.
     /// - Returns: The payload and response of the first 2xx or non-HTTP response. The caller owns the payload.
-    /// - Throws: `APIError`. `.cancelled` when the task is cancelled, also during a retry delay.
+    /// - Throws: `APIError`. `.cancelled` when the task is cancelled, also during a retry delay. `.transport`
+    ///   with a `PinningError`, without asking `retry`, when `PinningDelegate` rejects the server trust.
     private func sendWithRetry<Payload>(initial: URLRequest,
                                         perform: (URLRequest) async throws -> (Payload, URLResponse),
                                         responseBody: (Payload) -> Data?,
@@ -198,6 +200,11 @@ public final class URLSessionAPIClient: APIClientProtocol {
             } catch is CancellationError {
                 throw APIError.cancelled
             } catch let urlError as URLError where urlError.code == .cancelled {
+                // A rejected server trust is not retried: another attempt would get the same certificate.
+                if !Task.isCancelled, let failure = pinningFailure(for: urlError, of: request) {
+                    configuration.logger?.didFail(request, error: failure)
+                    throw APIError.transport(failure)
+                }
                 throw APIError.cancelled
             } catch let urlError as URLError {
                 configuration.logger?.didFail(request, error: urlError)
@@ -268,6 +275,15 @@ public final class URLSessionAPIClient: APIClientProtocol {
                                          response: response as? HTTPURLResponse,
                                          data: data,
                                          duration: Date().timeIntervalSince(start))
+    }
+
+    /// The rejected server trust that made URLSession cancel `request`'s task, or `nil` for any other cancellation.
+    ///
+    /// The error's `failingURL` comes first, because a redirect can take the task to another host than
+    /// `request`'s. Only `PinningDelegate` cancels a task while its caller is not cancelled.
+    private func pinningFailure(for error: URLError, of request: URLRequest) -> PinningError? {
+        guard let host = error.failingURL?.host ?? request.url?.host else { return nil }
+        return pinningDelegate?.failure(forHost: host)
     }
 
     /// Maps an error thrown by an interceptor's `adapt`. `AlamofireAPIClient.mapError` applies the same rules.

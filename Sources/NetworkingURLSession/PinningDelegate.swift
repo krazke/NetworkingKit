@@ -6,10 +6,12 @@ import NetworkingCore
 ///
 /// For a pinned host the system first evaluates the trust as URLSession presents it, so expiry, the host name
 /// and the chain to a trusted root are checked as with default handling; only then are the pins compared with
-/// the evaluated chain. A failure of either cancels the challenge, which fails the task with `URLError.cancelled`.
-/// An unpinned host gets default handling.
+/// the evaluated chain. A failure of either cancels the challenge, which fails the task with `URLError.cancelled`,
+/// and is recorded for `failure(forHost:)`. An unpinned host gets default handling.
 final class PinningDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let pinning: [String: PinningPolicy]
+    private let lock = NSLock()
+    private var failures: [String: PinningError] = [:]
 
     init(pinning: [String: PinningPolicy]) { self.pinning = pinning }
 
@@ -23,24 +25,40 @@ final class PinningDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegat
         }
 
         let host = challenge.protectionSpace.host
-        let policy = pinning[host] ?? .none
-
-        switch policy {
+        let matchesPin: (SecTrust) -> Bool
+        switch pinning[host] ?? .none {
         case .none:
-            completionHandler(.performDefaultHandling, nil)
-
+            return completionHandler(.performDefaultHandling, nil)
         case .certificates(let pinned):
-            guard evaluate(trust), validateCertificates(trust: trust, pinned: pinned) else {
-                return completionHandler(.cancelAuthenticationChallenge, nil)
-            }
-            completionHandler(.useCredential, URLCredential(trust: trust))
-
+            matchesPin = { self.validateCertificates(trust: $0, pinned: pinned) }
         case .publicKeys(let pinned):
-            guard evaluate(trust), validatePublicKeys(trust: trust, pinned: pinned) else {
-                return completionHandler(.cancelAuthenticationChallenge, nil)
-            }
-            completionHandler(.useCredential, URLCredential(trust: trust))
+            matchesPin = { self.validatePublicKeys(trust: $0, pinned: pinned) }
         }
+
+        guard evaluate(trust) else {
+            return reject(host, because: .trustEvaluationFailed, completionHandler)
+        }
+        guard matchesPin(trust) else {
+            return reject(host, because: .pinMismatch, completionHandler)
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+
+    /// The last rejection of `host`'s trust, or `nil` when none was rejected.
+    ///
+    /// URLSession reports a cancelled challenge only as `URLError.cancelled`, without the reason, so the client
+    /// looks the reason up by host. A later accepted challenge keeps the record: the client asks only about a task
+    /// that failed with `URLError.cancelled` while its caller was not cancelled, which in this client only a
+    /// rejected challenge causes, and clearing the record could race with that task's own failure.
+    func failure(forHost host: String) -> PinningError? {
+        lock.withLock { failures[host] }
+    }
+
+    private func reject(_ host: String,
+                        because reason: PinningError.Reason,
+                        _ completionHandler: (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        lock.withLock { failures[host] = PinningError(host: host, reason: reason) }
+        completionHandler(.cancelAuthenticationChallenge, nil)
     }
 
     /// Whether the system trusts `trust`. A pin match alone must not accept the connection: answering

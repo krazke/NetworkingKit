@@ -15,8 +15,10 @@ public protocol RequestInterceptor: Sendable {
     ///
     /// Called once for every attempt that was sent and failed with a non-2xx HTTP status or a transport
     /// error. Not called when the request fails before it is sent (building the request or its multipart
-    /// body, or `adapt`, throws), when the calling task is cancelled, or after a 2xx response, also when
-    /// its body cannot be decoded.
+    /// body, or `adapt`, throws), when the calling task is cancelled, when a pinned host's server trust is
+    /// rejected (the request then fails with `APIError.transport` wrapping a `PinningError`) or the Alamofire
+    /// transport rejects a host it has no trust evaluator for, or after a 2xx response, also when its body
+    /// cannot be decoded.
     ///
     /// - Parameters:
     ///   - request: The adapted request of the failed attempt.
@@ -24,9 +26,9 @@ public protocol RequestInterceptor: Sendable {
     ///     when an earlier attempt of the same request received a response.
     ///   - error: For a non-2xx status, the `APIError` the request fails with if it is not retried:
     ///     `.unauthorized`, `.forbidden`, `.notFound`, or `.server` carrying the response body (`nil`
-    ///     when the body is empty, and for `download`). For a transport error, the `URLError`. For a
-    ///     failure after sending that only the Alamofire transport produces, such as a failed server
-    ///     trust evaluation, the `APIError` the request fails with.
+    ///     when the body is empty, and for `download`). For a transport error, the `URLError`. For any
+    ///     other failure after sending, which only the Alamofire transport produces, the `APIError` the
+    ///     request fails with.
     ///   - attempt: The number of the failed attempt, starting at 1.
     /// - Returns: `.retry` or `.retryAfter(_:)` to send another attempt; `.doNotRetry` to fail the request.
     func retry(_ request: URLRequest,

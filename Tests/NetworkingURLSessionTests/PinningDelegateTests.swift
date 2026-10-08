@@ -5,9 +5,9 @@ import NetworkingCore
 
 /// `PinningDelegate`'s answer to a server trust challenge.
 ///
-/// `StubProtocol` never raises a server trust challenge, so the tests call the delegate with a challenge
-/// built around a `SecTrust` from `PinningFixtures`. A completed request is not covered: the delegate's
-/// answer is what decides whether the connection is used.
+/// The tests call the delegate with a challenge built around a `SecTrust` from `PinningFixtures`. What a
+/// rejected challenge turns into for the request is covered by `URLSessionPinningFailureTests` and
+/// `URLSessionPinningTLSTests`.
 final class PinningDelegateTests: XCTestCase {
     private typealias Pin = @Sendable (Data) -> PinningPolicy
 
@@ -73,6 +73,37 @@ final class PinningDelegateTests: XCTestCase {
         XCTAssertNil(answer.credential)
     }
 
+    // MARK: - Recorded failures
+
+    func testRecordsTrustEvaluationFailureForRejectedHost() {
+        let trust = PinningFixtures.serverTrust(presenting: PinningFixtures.expiredLeaf, forHost: PinningFixtures.host)
+        let delegate = PinningDelegate(pinning: [PinningFixtures.host: .certificates([PinningFixtures.expiredLeaf])])
+
+        _ = answer(of: delegate, host: PinningFixtures.host, trust: trust)
+
+        XCTAssertEqual(delegate.failure(forHost: PinningFixtures.host),
+                       PinningError(host: PinningFixtures.host, reason: .trustEvaluationFailed))
+    }
+
+    func testRecordsPinMismatchForRejectedHost() {
+        let trust = PinningFixtures.serverTrust(presenting: PinningFixtures.leaf, forHost: PinningFixtures.host)
+        let delegate = PinningDelegate(pinning: [PinningFixtures.host: .publicKeys([PinningFixtures.unrelated])])
+
+        _ = answer(of: delegate, host: PinningFixtures.host, trust: trust)
+
+        XCTAssertEqual(delegate.failure(forHost: PinningFixtures.host),
+                       PinningError(host: PinningFixtures.host, reason: .pinMismatch))
+    }
+
+    func testRecordsNoFailureForAcceptedHost() {
+        let trust = PinningFixtures.serverTrust(presenting: PinningFixtures.leaf, forHost: PinningFixtures.host)
+        let delegate = PinningDelegate(pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf])])
+
+        _ = answer(of: delegate, host: PinningFixtures.host, trust: trust)
+
+        XCTAssertNil(delegate.failure(forHost: PinningFixtures.host))
+    }
+
     // MARK: - Assertions
 
     private func assertAccepts(pin: Pin, file: StaticString = #filePath, line: UInt = #line) {
@@ -130,14 +161,9 @@ final class PinningDelegateTests: XCTestCase {
 
     private func answer(of delegate: PinningDelegate, host: String, trust: SecTrust,
                         file: StaticString = #filePath, line: UInt = #line) -> Answer {
-        let challenge = URLAuthenticationChallenge(protectionSpace: ServerTrustProtectionSpace(host: host, trust: trust),
-                                                   proposedCredential: nil,
-                                                   previousFailureCount: 0,
-                                                   failureResponse: nil,
-                                                   error: nil,
-                                                   sender: IgnoringChallengeSender())
         var answer: Answer?
-        delegate.urlSession(URLSession.shared, didReceive: challenge) { disposition, credential in
+        delegate.urlSession(URLSession.shared,
+                            didReceive: ServerTrustChallenge.make(host: host, trust: trust)) { disposition, credential in
             answer = Answer(disposition: disposition, credential: credential)
         }
         // The delegate answers synchronously; a missing answer would leave the connection waiting.
@@ -147,26 +173,4 @@ final class PinningDelegateTests: XCTestCase {
         }
         return answer
     }
-}
-
-/// A server trust protection space with a given trust. `URLProtectionSpace` has no initializer that takes one.
-private final class ServerTrustProtectionSpace: URLProtectionSpace, @unchecked Sendable {
-    private let trust: SecTrust
-
-    init(host: String, trust: SecTrust) {
-        self.trust = trust
-        super.init(host: host, port: 443, protocol: NSURLProtectionSpaceHTTPS, realm: nil,
-                   authenticationMethod: NSURLAuthenticationMethodServerTrust)
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    override var serverTrust: SecTrust? { trust }
-}
-
-/// The delegate answers through its completion handler, so the sender is never used.
-private final class IgnoringChallengeSender: NSObject, URLAuthenticationChallengeSender {
-    func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
-    func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
-    func cancel(_ challenge: URLAuthenticationChallenge) {}
 }

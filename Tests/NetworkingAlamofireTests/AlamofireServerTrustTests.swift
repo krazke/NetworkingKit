@@ -7,9 +7,9 @@ import NetworkingCore
 /// How the evaluators `ServerTrustFactory` builds judge a server trust: default system validation and host
 /// validation first, then the pins, as `PinningDelegate` does in the URLSession transport.
 ///
-/// `StubProtocol` never raises a server trust challenge, so the tests evaluate a `SecTrust` from
-/// `PinningFixtures` with the evaluator the manager returns for the host. What a failed evaluation turns into
-/// for the request (`.transport`, after retries) is not covered here.
+/// The tests evaluate a `SecTrust` from `PinningFixtures` with the evaluator the manager returns for the host.
+/// What a failed evaluation turns into for the request is covered by `AlamofirePinningFailureTests` and
+/// `AlamofirePinningTLSTests`.
 final class AlamofireServerTrustTests: XCTestCase {
     private typealias Pin = @Sendable (Data) -> PinningPolicy
 

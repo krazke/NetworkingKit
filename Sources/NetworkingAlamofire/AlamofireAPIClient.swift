@@ -29,8 +29,9 @@ public final class AlamofireAPIClient: APIClientProtocol {
         self.init(session: session, configuration: configuration)
     }
 
-    private static func buildSession(configuration: NetworkConfiguration,
-                                     additionalMonitors: [EventMonitor]) -> Session {
+    /// The session `init(configuration:)` uses. Internal so that tests can reach its delegate.
+    static func buildSession(configuration: NetworkConfiguration,
+                             additionalMonitors: [EventMonitor]) -> Session {
         var monitors: [EventMonitor] = additionalMonitors
         if let logger = configuration.logger {
             monitors.append(EventLoggerAdapter(logger: logger))
@@ -134,7 +135,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
             try destination.moveDownloadedFile(at: location, to: target)
             return target
         case .failure(let error):
-            throw Self.mapError(error, cancelled: Task.isCancelled)
+            throw Self.mapError(error, host: Self.host(of: request), cancelled: Task.isCancelled)
         }
     }
 
@@ -159,8 +160,14 @@ public final class AlamofireAPIClient: APIClientProtocol {
         case .success(let value):
             return value
         case .failure(let error):
-            throw Self.mapError(error, responseBody: response.data, cancelled: Task.isCancelled)
+            throw Self.mapError(error, responseBody: response.data, host: Self.host(of: request),
+                                cancelled: Task.isCancelled)
         }
+    }
+
+    /// The host `request`'s last task connected to, which names the host of a rejected server trust.
+    private static func host(of request: Alamofire.Request) -> String? {
+        (request.task?.currentRequest ?? request.request)?.url?.host
     }
 
     private func adapter(for endpoint: APIEndpoint) -> EndpointAdapter {
@@ -202,10 +209,14 @@ public final class AlamofireAPIClient: APIClientProtocol {
     /// `adapt`, or by the session task in an `AFError`. That error is unwrapped and mapped by the rules
     /// `URLSessionAPIClient` uses: an `APIError` passes through unchanged, a `URLError` becomes `.transport`
     /// with the `URLError` itself, and `CancellationError` or `URLError.cancelled` becomes `.cancelled`.
+    /// A pinned host's rejected server trust becomes `.transport` with a `PinningError`.
     ///
-    /// - Parameter cancelled: Whether the calling task was cancelled. A request cancelled while it waits for a
-    ///   retry delay fails with the error of its last attempt, which then becomes `.cancelled`.
-    static func mapError(_ error: any Error, responseBody: Data? = nil, cancelled: Bool = false) -> APIError {
+    /// - Parameters:
+    ///   - host: The host the request connected to, for a rejected server trust whose reason does not name it.
+    ///   - cancelled: Whether the calling task was cancelled. A request cancelled while it waits for a retry
+    ///     delay fails with the error of its last attempt, which then becomes `.cancelled`.
+    static func mapError(_ error: any Error, responseBody: Data? = nil, host: String? = nil,
+                         cancelled: Bool = false) -> APIError {
         if cancelled { return .cancelled }
         guard let af = error as? AFError else { return Self.mapUnderlying(error) }
         if af.isExplicitlyCancelledError { return .cancelled }
@@ -236,8 +247,33 @@ public final class AlamofireAPIClient: APIClientProtocol {
              .responseSerializationFailed(reason: .invalidEmptyResponse):
             // An empty 2xx body where a value was expected; `JSONDecoder` rejects it in the URLSession transport.
             return .decoding(NonSendableErrorBox(af))
+        case .serverTrustEvaluationFailed(reason: let reason):
+            if let pinning = pinningError(for: reason, host: host) { return .transport(pinning) }
+            return .transport(NonSendableErrorBox(af))
         default:
             return .transport(NonSendableErrorBox(af))
+        }
+    }
+
+    /// The `PinningError` for a pinned host's rejected server trust, or `nil` for `noRequiredEvaluator`, which an
+    /// unpinned host gets while another host is pinned, and for a reason without a host when `host` is `nil`.
+    private static func pinningError(for reason: AFError.ServerTrustFailureReason, host: String?) -> PinningError? {
+        switch reason {
+        case .noRequiredEvaluator:
+            return nil
+        case .certificatePinningFailed(host: let pinnedHost, trust: _, pinnedCertificates: _, serverCertificates: _),
+             .publicKeyPinningFailed(host: let pinnedHost, trust: _, pinnedKeys: _, serverKeys: _):
+            return PinningError(host: pinnedHost, reason: .pinMismatch)
+        case .noCertificatesFound, .noPublicKeysFound:
+            // An evaluator without pins, which `ServerTrustFactory` does not build: no pin could match.
+            return host.map { PinningError(host: $0, reason: .pinMismatch) }
+        case .defaultEvaluationFailed(output: let output), .hostValidationFailed(output: let output),
+             .revocationCheckFailed(output: let output, options: _):
+            return PinningError(host: output.host, reason: .trustEvaluationFailed)
+        default:
+            // `.trustEvaluationFailed`, which the evaluators throw when the system rejects the trust, and the
+            // failures to set up an evaluation.
+            return host.map { PinningError(host: $0, reason: .trustEvaluationFailed) }
         }
     }
 

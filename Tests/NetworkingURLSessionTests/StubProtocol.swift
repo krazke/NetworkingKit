@@ -27,11 +27,22 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static private(set) var bodies: [Data?] = []
     static let queue = DispatchQueue(label: "stub-protocol")
 
-    static func reset(responder: (@Sendable (URLRequest) -> Stub)? = nil) {
+    /// Answers the server trust challenge of a request before the stub responds, by passing the
+    /// disposition the client's delegate chose to the completion handler. URLSession answers a challenge raised
+    /// by a URLProtocol itself, without asking the session's delegate, so a test that checks pinning provides
+    /// the delegate call. After `.cancelAuthenticationChallenge` the request fails with `URLError.cancelled`
+    /// carrying the failing URL, as URLSession fails a TLS connection whose challenge was cancelled.
+    typealias ServerTrustChallenger = @Sendable (URLSessionTask, URLRequest,
+                                                 @escaping @Sendable (URLSession.AuthChallengeDisposition) -> Void) -> Void
+    nonisolated(unsafe) static private var challenger: ServerTrustChallenger?
+
+    static func reset(responder: (@Sendable (URLRequest) -> Stub)? = nil,
+                      serverTrustChallenger: ServerTrustChallenger? = nil) {
         queue.sync {
             requests.removeAll()
             bodies.removeAll()
             self.responder = responder
+            self.challenger = serverTrustChallenger
         }
     }
 
@@ -74,6 +85,23 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         let stub = responder(req)
+        guard let task, let challenger = Self.queue.sync(execute: { Self.challenger }) else {
+            return load(stub, for: req, body: body)
+        }
+        let proto = self
+        challenger(task, req) { disposition in
+            guard disposition != .cancelAuthenticationChallenge else {
+                proto.client?.urlProtocol(proto, didFailWithError: URLError(.cancelled, userInfo: [
+                    NSURLErrorFailingURLErrorKey: req.url!,
+                    NSURLErrorFailingURLStringErrorKey: req.url!.absoluteString,
+                ]))
+                return
+            }
+            proto.load(stub, for: req, body: body)
+        }
+    }
+
+    private func load(_ stub: Stub, for req: URLRequest, body: Data?) {
         reportSentBody(stub.sentBodyFractions, length: body?.count ?? 0)
 
         let proto = self
