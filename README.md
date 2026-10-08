@@ -504,6 +504,7 @@ The package is a prototype. The issues below were confirmed by reading the code,
 - `ServerTrustFactory` skips a host whose `.certificates` or `.publicKeys` list is empty or holds no DER certificate it can parse (`ServerTrustFactory.swift`). When that is the only pinned host, `makeManager` returns `nil` and the session has no `ServerTrustManager`, so the host silently gets default validation without pinning; with another pinned host it fails with `noRequiredEvaluator` instead. The URLSession transport rejects such a host, because no pin can match.
 
 **Both transports**
+- A failed trust evaluation for a host without pinning is retried like any transport error. URLSession reports it as a `URLError` such as `.serverCertificateUntrusted` (-1202) with no response, so `RetryInterceptor` sends the request again for a method in `retryableMethods`, up to `limit` attempts with backoff, although the server's certificate does not change between attempts.
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
 
 **NetworkingCore**
@@ -520,7 +521,7 @@ The package is a prototype. The issues below were confirmed by reading the code,
 - There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
 
 **Missing**
-- An end-to-end pinning test. `StubProtocol` raises no server trust challenge, so the pinning tests evaluate a constructed `SecTrust` with `PinningDelegate` and with the evaluators `ServerTrustFactory` builds; they do not cover a TLS connection, the `APIError` a rejected challenge becomes, or what reaches `retry`.
+- An end-to-end pinning test. `StubProtocol` raises no server trust challenge, and cannot: URLSession answers a challenge raised by a `URLProtocol` itself with default handling and never passes it to the session's delegate. The pinning tests therefore evaluate a constructed `SecTrust` with `PinningDelegate` and with the evaluators `ServerTrustFactory` builds; they do not cover a TLS connection, the `APIError` a rejected challenge becomes, or what reaches `retry`.
 - Tests for cancelling a multipart `upload` or a `download` while the request is in flight.
 - An end-to-end test of upload progress. URLSession does not call `didSendBodyData` for a request served by a `URLProtocol`, so the progress tests have `StubProtocol` call the task's delegate (URLSession transport) or `Session.delegate` (Alamofire transport) instead; they do not cover the callbacks URLSession makes over a real connection, or the queue the handler runs on.
 - Proactive refresh (`AuthTokens.isExpired` is unused).
