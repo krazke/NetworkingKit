@@ -72,7 +72,42 @@ final class AlamofireServerTrustTests: XCTestCase {
         }
     }
 
+    // MARK: - Pin list without a usable pin
+
+    func testEmptyCertificatePinListRejectsTrustedChain() throws {
+        try assertRejectsTrustedChain(pin: .certificates([]))
+    }
+
+    func testUnparsablePublicKeyPinListRejectsTrustedChain() throws {
+        try assertRejectsTrustedChain(pin: .publicKeys([Data("not a certificate".utf8)]))
+    }
+
+    /// The system's evaluation still comes first, so an untrusted chain fails it rather than the missing pins.
+    func testEmptyPinListRejectsUntrustedRootBeforeComparingPins() throws {
+        let trust = PinningFixtures.serverTrust(presenting: PinningFixtures.leaf,
+                                                forHost: PinningFixtures.host,
+                                                anchored: false)
+        let evaluator = try evaluator(for: [PinningFixtures.host: .certificates([])], host: PinningFixtures.host)
+
+        assertFailsTrustEvaluation(try evaluator.evaluate(trust, forHost: PinningFixtures.host),
+                                   file: #filePath, line: #line)
+    }
+
     // MARK: - Assertions
+
+    /// No pin can match, so a chain the system trusts is rejected for having no pins.
+    private func assertRejectsTrustedChain(pin: PinningPolicy, file: StaticString = #filePath, line: UInt = #line) throws {
+        let trust = PinningFixtures.serverTrust(presenting: PinningFixtures.leaf, forHost: PinningFixtures.host)
+        let evaluator = try evaluator(for: [PinningFixtures.host: pin], host: PinningFixtures.host,
+                                      file: file, line: line)
+
+        assertFails(try evaluator.evaluate(trust, forHost: PinningFixtures.host), file: file, line: line) {
+            switch $0 {
+            case .noCertificatesFound, .noPublicKeysFound: return true
+            default: return false
+            }
+        }
+    }
 
     private func assertAccepts(pin: Pin, file: StaticString = #filePath, line: UInt = #line) throws {
         let trust = PinningFixtures.serverTrust(presenting: PinningFixtures.leaf, forHost: PinningFixtures.host)

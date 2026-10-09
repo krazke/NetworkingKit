@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 299 XCTest cases (Core 67, URLSession 116, WebSocket 5, Alamofire 111). All 299 passed on 2026-10-08 with Xcode 27.0 / Swift 6.4.
+The suite contains 330 XCTest cases (Core 67, URLSession 130, WebSocket 5, Alamofire 128). All 330 passed on 2026-10-09 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -326,13 +326,15 @@ NetworkConfiguration(
 
 Pinning adds to the system's trust evaluation; it does not replace it. For a pinned host both transports first evaluate the server trust as the system would without pinning, checking expiry, the host name and the chain to a trusted root, and then require a certificate or key from the chain to match a pin. A certificate that the system does not trust, such as a self-signed one or one issued by a private CA the device does not trust, fails even when it is pinned.
 
-- `NetworkingAlamofire` maps the policies onto `ServerTrustManager` with `PinnedCertificatesTrustEvaluator` / `PublicKeysTrustEvaluator` and their default settings (default and host validation on, self-signed certificates not accepted).
+- `NetworkingAlamofire` maps the policies onto `ServerTrustManager` with `PinnedCertificatesTrustEvaluator` / `PublicKeysTrustEvaluator` and their default settings (default and host validation on, self-signed certificates not accepted). A host whose list has no usable pin gets an evaluator that runs the system's evaluation and then rejects the trust.
 - `NetworkingURLSession` uses an internal `URLSessionDelegate` that calls `SecTrustEvaluateWithError` on the trust URLSession presents and then compares certificates or keys from the evaluated chain. Before 1.0.12 it skipped the evaluation, so a matching pin also accepted an expired certificate, a certificate for another host or an untrusted chain.
 
 **When pinning rejects a host,** the request fails at once with `APIError.transport` wrapping a `PinningError`. Neither transport calls `retry` for it, because another attempt would get the same certificate. `PinningError.host` is the host whose trust was rejected, and `reason` says why:
 
 - `.trustEvaluationFailed`: the system rejected the certificate before the pins were compared, for example because it has expired, is issued for another host or does not chain to a trusted root.
 - `.pinMismatch`: the system trusts the chain, but no certificate or key in it matches a pin.
+
+A pinned host whose list is empty or holds no DER certificate that can be parsed is rejected in both transports, because no pin can match: with `.pinMismatch`, or with `.trustEvaluationFailed` when the system already rejects the certificate. Before 1.1.1 the Alamofire transport skipped such a host, so when it was the only pinned host it got default validation without pinning, and next to another pinned host it failed with `noRequiredEvaluator`.
 
 A network failure stays `.transport` with a `URLError`, so the two can be told apart:
 
@@ -524,8 +526,7 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 The package is a prototype. The issues below were confirmed by reading the code, some also by a throwaway test; none is covered by a test in the suite yet.
 
 **Alamofire transport**
-- `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets).
-- `ServerTrustFactory` skips a host whose `.certificates` or `.publicKeys` list is empty or holds no DER certificate it can parse (`ServerTrustFactory.swift`). When that is the only pinned host, `makeManager` returns `nil` and the session has no `ServerTrustManager`, so the host silently gets default validation without pinning; with another pinned host it fails with `noRequiredEvaluator` instead. The URLSession transport rejects such a host, because no pin can match.
+- `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets). Since 1.1.1 a host whose pin list is empty or unparsable counts as pinned too.
 
 **Both transports**
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.

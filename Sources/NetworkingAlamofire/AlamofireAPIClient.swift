@@ -265,7 +265,7 @@ public final class AlamofireAPIClient: APIClientProtocol {
              .publicKeyPinningFailed(host: let pinnedHost, trust: _, pinnedKeys: _, serverKeys: _):
             return PinningError(host: pinnedHost, reason: .pinMismatch)
         case .noCertificatesFound, .noPublicKeysFound:
-            // An evaluator without pins, which `ServerTrustFactory` does not build: no pin could match.
+            // An evaluator without pins, which `ServerTrustFactory` builds for an empty or unparsable pin list.
             return host.map { PinningError(host: $0, reason: .pinMismatch) }
         case .defaultEvaluationFailed(output: let output), .hostValidationFailed(output: let output),
              .revocationCheckFailed(output: let output, options: _):

@@ -26,6 +26,11 @@ final class URLSessionPinningTLSTests: XCTestCase {
                                  pin: .publicKeys([LoopbackTLSServer.expiredCertificate]))
     }
 
+    /// No pin can match an empty list; the system rejects the certificate before the pins are compared.
+    func testEmptyPinListOnUntrustedCertificateThrowsPinningErrorWithoutRetry() async throws {
+        try await assertRejected(presenting: LoopbackTLSServer.certificate, pin: .certificates([]))
+    }
+
     private func assertRejected(presenting certificate: Data, pin: PinningPolicy,
                                 file: StaticString = #filePath, line: UInt = #line) async throws {
         let server = try await LoopbackTLSServer(presenting: certificate)

@@ -87,6 +87,45 @@ final class AlamofirePinningFailureTests: XCTestCase {
         }
     }
 
+    // MARK: - Pin list without a usable pin
+
+    /// No pin can match an empty list, so the host is rejected rather than left unpinned.
+    func testEmptyCertificatePinListThrowsPinMismatchWithoutRetry() async throws {
+        try await assertRejected(presenting: PinningFixtures.leaf,
+                                 pin: .certificates([]),
+                                 as: .pinMismatch)
+    }
+
+    func testUnparsablePublicKeyPinListThrowsPinMismatchWithoutRetry() async throws {
+        try await assertRejected(presenting: PinningFixtures.leaf,
+                                 pin: .publicKeys([Data("not a certificate".utf8)]),
+                                 as: .pinMismatch)
+    }
+
+    /// With another host pinned, the host with an empty list is still a pinned host, not one without an evaluator.
+    func testEmptyPinListBesideAnotherPinnedHostThrowsPinningError() async throws {
+        let recorder = RecordingInterceptor()
+        let client = makeClient(host: PinningFixtures.host,
+                                pinning: [PinningFixtures.host: .certificates([]),
+                                          PinningFixtures.wrongHost: .certificates([PinningFixtures.leaf])],
+                                presenting: PinningFixtures.leaf,
+                                anchored: true,
+                                recorder: recorder)
+
+        do {
+            try await client.sendVoid(GetEndpoint())
+            XCTFail("Expected APIError.transport(PinningError)")
+        } catch APIError.transport(let error as PinningError) {
+            XCTAssertEqual(error, PinningError(host: PinningFixtures.host, reason: .pinMismatch))
+        } catch {
+            XCTFail("Expected APIError.transport(PinningError), got \(error)")
+        }
+
+        let retries = await recorder.retryAttempts.count
+        XCTAssertEqual(retries, 0)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+    }
+
     /// An unpinned host while another host is pinned fails with Alamofire's `noRequiredEvaluator`
     /// (see the known issues). That is not a pin failure, but it is not retried either.
     func testUnpinnedHostWithoutEvaluatorIsNotRetried() async throws {

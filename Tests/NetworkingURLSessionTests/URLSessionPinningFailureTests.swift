@@ -85,6 +85,21 @@ final class URLSessionPinningFailureTests: XCTestCase {
         }
     }
 
+    // MARK: - Pin list without a usable pin
+
+    /// No pin can match an empty list, so the host is rejected rather than left unpinned.
+    func testEmptyCertificatePinListThrowsPinMismatchWithoutRetry() async throws {
+        try await assertRejected(presenting: PinningFixtures.leaf,
+                                 pin: .certificates([]),
+                                 as: .pinMismatch)
+    }
+
+    func testUnparsablePublicKeyPinListThrowsPinMismatchWithoutRetry() async throws {
+        try await assertRejected(presenting: PinningFixtures.leaf,
+                                 pin: .publicKeys([Data("not a certificate".utf8)]),
+                                 as: .pinMismatch)
+    }
+
     // MARK: - Accepted trust
 
     /// Guards the setup: a challenge the delegate accepts lets the request through.
