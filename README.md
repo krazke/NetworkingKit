@@ -529,6 +529,7 @@ The package is a prototype. The issues below were confirmed by reading the code,
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets). Since 1.1.1 a host whose pin list is empty or unparsable counts as pinned too.
 
 **Both transports**
+- A failed client-certificate handshake is retried like any transport error. Only the four server trust codes listed under [SSL pinning](#ssl-pinning) skip `retry`, so `.clientCertificateRejected` (-1205) and `.clientCertificateRequired` (-1206) reach `RetryInterceptor`, which sends the request again for a method in `retryableMethods`, up to `limit` attempts. Neither transport answers a client-certificate challenge itself: URLSession, `PinningDelegate` and Alamofire's `SessionDelegate` give it default handling, so another attempt meets the same credentials and most likely fails the same way.
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
 
 **NetworkingCore**
