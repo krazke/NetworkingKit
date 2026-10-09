@@ -157,7 +157,8 @@ public final class URLSessionAPIClient: APIClientProtocol {
     ///     Called once for every failed or retried attempt.
     /// - Returns: The payload and response of the first 2xx or non-HTTP response. The caller owns the payload.
     /// - Throws: `APIError`. `.cancelled` when the task is cancelled, also during a retry delay. `.transport`
-    ///   with a `PinningError`, without asking `retry`, when `PinningDelegate` rejects the server trust.
+    ///   with a `PinningError`, without asking `retry`, when `PinningDelegate` rejects the server trust, and with
+    ///   the `URLError`, also without asking `retry`, when the system rejects an unpinned host's certificate.
     private func sendWithRetry<Payload>(initial: URLRequest,
                                         perform: (URLRequest) async throws -> (Payload, URLResponse),
                                         responseBody: (Payload) -> Data?,
@@ -206,6 +207,10 @@ public final class URLSessionAPIClient: APIClientProtocol {
                     throw APIError.transport(failure)
                 }
                 throw APIError.cancelled
+            } catch let urlError as URLError where urlError.isServerTrustFailure {
+                // The system rejected the certificate of a host without pinning; another attempt would get it again.
+                configuration.logger?.didFail(request, error: urlError)
+                throw APIError.transport(urlError)
             } catch let urlError as URLError {
                 configuration.logger?.didFail(request, error: urlError)
                 failure = .transport(urlError)

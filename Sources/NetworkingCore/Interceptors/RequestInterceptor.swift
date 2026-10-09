@@ -17,8 +17,9 @@ public protocol RequestInterceptor: Sendable {
     /// error. Not called when the request fails before it is sent (building the request or its multipart
     /// body, or `adapt`, throws), when the calling task is cancelled, when a pinned host's server trust is
     /// rejected (the request then fails with `APIError.transport` wrapping a `PinningError`) or the Alamofire
-    /// transport rejects a host it has no trust evaluator for, or after a 2xx response, also when its body
-    /// cannot be decoded.
+    /// transport rejects a host it has no trust evaluator for, when the system rejects the certificate of a host
+    /// without pinning (the request then fails with `APIError.transport` wrapping a `URLError` such as
+    /// `.serverCertificateUntrusted`), or after a 2xx response, also when its body cannot be decoded.
     ///
     /// - Parameters:
     ///   - request: The adapted request of the failed attempt.

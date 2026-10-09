@@ -271,8 +271,9 @@ An interceptor in `additionalInterceptors` that decides to retry runs before `Re
 |---|---|---|---|
 | Building the request or its multipart body fails, or `adapt` throws | No; the request fails at once with the `APIError` listed under [Errors](#errors) | — | — |
 | Non-2xx status | Yes | The attempt's `HTTPURLResponse` | The `APIError` the request fails with if it is not retried: `.unauthorized`, `.forbidden`, `.notFound`, or `.server` carrying the response body (`nil` when the body is empty, and for `download`) |
-| Transport failure | Yes | `nil`, also when an earlier attempt received a response | The `URLError`; the request fails with `.transport` wrapping it |
+| Transport failure, including `.secureConnectionFailed` | Yes | `nil`, also when an earlier attempt received a response | The `URLError`; the request fails with `.transport` wrapping it |
 | A pinned host's server trust is rejected | No; the request fails at once with `.transport` wrapping a `PinningError` (see [SSL pinning](#ssl-pinning)) | — | — |
+| The system rejects the certificate of a host without pinning | No; the request fails at once with `.transport` wrapping the `URLError` (see [SSL pinning](#ssl-pinning)) | — | — |
 | The Alamofire transport rejects the server trust of a host it has no evaluator for (`noRequiredEvaluator`, see [known issues](#status--known-issues)) | No; the request fails at once with `.transport` wrapping the `AFError` | — | — |
 | Any other failure after sending, which only the Alamofire transport produces | Yes | The attempt's response, if any | The `APIError` the request fails with |
 | 2xx response, also when its body cannot be decoded | No | — | — |
@@ -298,6 +299,7 @@ Both transports throw only `APIError` and map each failure to the same case:
 | The response body does not decode as the requested type, including an empty body | `.decoding` |
 | The request fails with a `URLError`, such as `.notConnectedToInternet` or `.timedOut`, also after the last retry | `.transport` with that `URLError` |
 | A pinned host's server trust is rejected: the system rejects the certificate, or no certificate or key in the chain matches a pin | `.transport` with a `PinningError` (see [SSL pinning](#ssl-pinning)) |
+| The system rejects the certificate of a host without pinning | `.transport` with the `URLError`: `.serverCertificateHasBadDate`, `.serverCertificateUntrusted`, `.serverCertificateHasUnknownRoot` or `.serverCertificateNotYetValid`, without retries |
 | An interceptor's `adapt` throws an `APIError` | That `APIError`, unchanged |
 | `adapt` throws a `URLError` | `.transport` with that `URLError` |
 | `adapt` throws any other error | `.unknown` |
@@ -342,11 +344,13 @@ do {
     // the app's pins do not cover yet.
     analytics.record(host: error.host, reason: error.reason)   // app-defined
 } catch APIError.transport(let error as URLError) {
-    // Offline, timed out, and other network failures.
+    // Offline, timed out, a rejected certificate of an unpinned host, and other network failures.
 }
 ```
 
-Before 1.1.0 the URLSession transport threw `.cancelled` for a rejected pinned host, and the Alamofire transport retried it like a transport error, up to `limit` attempts, before it threw `.transport` wrapping the `AFError`. A failed trust evaluation for a host without pinning is still a `URLError` such as `.serverCertificateUntrusted`, and is still retried (see [known issues](#status--known-issues)).
+Before 1.1.0 the URLSession transport threw `.cancelled` for a rejected pinned host, and the Alamofire transport retried it like a transport error, up to `limit` attempts, before it threw `.transport` wrapping the `AFError`.
+
+**When the system rejects an unpinned host's certificate,** the request also fails at once, without calling `retry`, but stays `.transport` with the `URLError` URLSession reports for the failed check (expiry, host name or chain to a trusted root): `.serverCertificateHasBadDate`, `.serverCertificateUntrusted`, `.serverCertificateHasUnknownRoot` or `.serverCertificateNotYetValid`. For a self-signed certificate URLSession reports `.serverCertificateUntrusted`, also when it has expired or is issued for another host. `.secureConnectionFailed` is still retried, because a TLS handshake can also fail for a transient reason, such as a connection reset during the handshake. Before 1.1.1 both transports retried every one of these codes like a network failure. In the Alamofire transport this applies to a host without an evaluator only while no host is pinned; otherwise the request fails with `noRequiredEvaluator` (see [known issues](#status--known-issues)).
 
 Pinning applies to the HTTP clients only. `WebSocketConfiguration` has no pinning option. Both implementations have behavioral gaps listed under known issues.
 
@@ -524,7 +528,6 @@ The package is a prototype. The issues below were confirmed by reading the code,
 - `ServerTrustFactory` skips a host whose `.certificates` or `.publicKeys` list is empty or holds no DER certificate it can parse (`ServerTrustFactory.swift`). When that is the only pinned host, `makeManager` returns `nil` and the session has no `ServerTrustManager`, so the host silently gets default validation without pinning; with another pinned host it fails with `noRequiredEvaluator` instead. The URLSession transport rejects such a host, because no pin can match.
 
 **Both transports**
-- A failed trust evaluation for a host without pinning is retried like any transport error. URLSession reports it as a `URLError` such as `.serverCertificateUntrusted` (-1202) with no response, so `RetryInterceptor` sends the request again for a method in `retryableMethods`, up to `limit` attempts with backoff, although the server's certificate does not change between attempts.
 - `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
 
 **NetworkingCore**

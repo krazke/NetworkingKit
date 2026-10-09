@@ -78,7 +78,8 @@ final class InterceptorBridge: Alamofire.RequestInterceptor {
     /// `URLSessionAPIClient` passes them, or `nil` when the failure must not reach the chain.
     ///
     /// - Returns: `nil` for a failure before the request is sent (building the request or the multipart
-    ///   body, `adapt`, or Alamofire's request validation), for a rejected server trust, and for a 2xx
+    ///   body, `adapt`, or Alamofire's request validation), for a server trust rejected by an evaluator or,
+    ///   for a host without one, by URLSession (`URLError.isServerTrustFailure`), and for a 2xx
     ///   response whose body cannot be serialized. No response and the `URLError` for a transport error,
     ///   even when the task received headers before it failed. Otherwise the attempt's response and the `APIError` the request fails
     ///   with, which for a non-2xx status carries the response body of a data or upload request (`nil` when
@@ -96,6 +97,9 @@ final class InterceptorBridge: Alamofire.RequestInterceptor {
             return nil
         case .serverTrustEvaluationFailed:
             // Another attempt would get the same certificate; `URLSessionAPIClient` does not ask either.
+            return nil
+        case .sessionTaskFailed(error: let urlError as URLError) where urlError.isServerTrustFailure:
+            // URLSession itself rejected the certificate of a host without an evaluator; the same applies.
             return nil
         case .sessionTaskFailed(error: let urlError as URLError):
             return (nil, urlError)
