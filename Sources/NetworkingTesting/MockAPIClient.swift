@@ -20,7 +20,7 @@ public actor MockAPIClient: APIClientProtocol {
 
     public private(set) var recordedCalls: [Call] = []
     private var stubs: [String: StubResponse] = [:]
-    private var defaultStub: StubResponse = .failure(.notFound)
+    private var defaultStub: StubResponse = .failure(.notFound(data: nil))
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
 
@@ -43,7 +43,7 @@ public actor MockAPIClient: APIClientProtocol {
     public func reset() {
         recordedCalls.removeAll()
         stubs.removeAll()
-        defaultStub = .failure(.notFound)
+        defaultStub = .failure(.notFound(data: nil))
     }
 
     public func calls(for path: String) -> [Call] {

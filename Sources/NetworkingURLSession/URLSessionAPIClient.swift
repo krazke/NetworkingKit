@@ -250,15 +250,16 @@ public final class URLSessionAPIClient: APIClientProtocol {
         }
     }
 
-    /// The error for a non-2xx response. `.server` carries an empty body as `nil`, as the Alamofire transport does.
+    /// The error for a non-2xx response. It carries an empty body as `nil`, as the Alamofire transport does.
     private func statusError(_ http: HTTPURLResponse, data: Data?) -> APIError {
+        let body = data?.isEmpty == false ? data : nil
         switch http.statusCode {
-        case 401: return .unauthorized
-        case 403: return .forbidden
-        case 404: return .notFound
+        case 401: return .unauthorized(data: body)
+        case 403: return .forbidden(data: body)
+        case 404: return .notFound(data: body)
         default:
             return .server(statusCode: http.statusCode,
-                           data: data?.isEmpty == false ? data : nil,
+                           data: body,
                            message: HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
         }
     }

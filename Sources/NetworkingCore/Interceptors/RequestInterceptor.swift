@@ -26,7 +26,7 @@ public protocol RequestInterceptor: Sendable {
     ///   - response: The attempt's response for a non-2xx status. `nil` after a transport error, also
     ///     when an earlier attempt of the same request received a response.
     ///   - error: For a non-2xx status, the `APIError` the request fails with if it is not retried:
-    ///     `.unauthorized`, `.forbidden`, `.notFound`, or `.server` carrying the response body (`nil`
+    ///     `.unauthorized`, `.forbidden`, `.notFound` or `.server`, carrying the response body (`nil`
     ///     when the body is empty, and for `download`). For a transport error, the `URLError`. For any
     ///     other failure after sending, which only the Alamofire transport produces, the `APIError` the
     ///     request fails with.

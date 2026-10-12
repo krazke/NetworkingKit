@@ -221,14 +221,14 @@ public final class AlamofireAPIClient: APIClientProtocol {
         guard let af = error as? AFError else { return Self.mapUnderlying(error) }
         if af.isExplicitlyCancelledError { return .cancelled }
 
+        // An empty body is `nil` in both transports.
+        let body = responseBody?.isEmpty == false ? responseBody : nil
         switch af.responseCode {
-        case 401: return .unauthorized
-        case 403: return .forbidden
-        case 404: return .notFound
+        case 401: return .unauthorized(data: body)
+        case 403: return .forbidden(data: body)
+        case 404: return .notFound(data: body)
         case let code? where (400..<600).contains(code):
-            // An empty body is `nil` in both transports.
-            return .server(statusCode: code, data: responseBody?.isEmpty == false ? responseBody : nil,
-                           message: af.errorDescription)
+            return .server(statusCode: code, data: body, message: af.errorDescription)
         default: break
         }
 

@@ -91,9 +91,15 @@ public actor AuthInterceptor: RequestInterceptor {
         try await task.value
     }
 
+    /// Why a 401 is not retried. `retry` swallows it: the request fails with the transport's error for that 401.
+    private enum RefreshDenied: Error {
+        case noTokens
+        case windowExhausted
+    }
+
     private func performRefresh(rejectedAccessToken: String?) async throws {
         guard let current = await tokenStore.current() else {
-            throw APIError.unauthorized
+            throw RefreshDenied.noTokens
         }
         // The request was sent with an older token (or before login):
         // retrying picks up the current token without another refresh.
@@ -109,7 +115,7 @@ public actor AuthInterceptor: RequestInterceptor {
         let windowStart = now - .seconds(refreshWindow.interval)
         recentRefreshes.removeAll { $0 < windowStart }
         guard recentRefreshes.count < refreshWindow.maximumRefreshes else {
-            throw APIError.unauthorized
+            throw RefreshDenied.windowExhausted
         }
         recentRefreshes.append(now)
     }

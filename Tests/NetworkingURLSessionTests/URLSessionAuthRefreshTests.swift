@@ -33,23 +33,28 @@ final class URLSessionAuthRefreshTests: XCTestCase {
 
     private func makeClient(server: RotatingAuthServer,
                             store: MockTokenStore,
-                            retry: RetryConfiguration = .none) -> URLSessionAPIClient {
+                            retry: RetryConfiguration = .none,
+                            refreshWindow: AuthInterceptor.RefreshWindow = .default) -> URLSessionAPIClient {
         let config = NetworkConfiguration(
             baseURL: URL(string: "https://api.test")!,
             sessionConfiguration: .stubbed,
             retry: retry,
             tokenStore: store,
-            refreshAction: { try await server.refresh($0) }
+            refreshAction: { try await server.refresh($0) },
+            refreshWindow: refreshWindow
         )
         return URLSessionAPIClient(configuration: config)
     }
 
-    /// Answers 200 only to requests that carry `validToken`, 401 otherwise.
+    /// The body of every 401, an error envelope the app would decode.
+    private static let rejection = Data(#"{"error":"invalid_token"}"#.utf8)
+
+    /// Answers 200 only to requests that carry `validToken`, 401 with `rejection` otherwise.
     private static func respond(to request: URLRequest,
                                 validToken: String,
                                 delay: TimeInterval = 0) -> StubProtocol.Stub {
         guard request.value(forHTTPHeaderField: "Authorization") == "Bearer \(validToken)" else {
-            return .init(statusCode: 401, data: Data(), headers: [:], delay: delay)
+            return .init(statusCode: 401, data: rejection, headers: ["Content-Type": "application/json"], delay: delay)
         }
         let data = try! JSONEncoder().encode(Echo(value: "ok"))
         return .init(statusCode: 200, data: data, headers: ["Content-Type": "application/json"], delay: delay)
@@ -154,23 +159,89 @@ final class URLSessionAuthRefreshTests: XCTestCase {
         XCTAssertEqual(try TemporaryFiles.downloads(), downloadsBefore)
     }
 
-    func test_rejectedRefresh_throwsUnauthorized() async {
+    /// Fails the test unless `operation` throws `.unauthorized`; returns that error's body.
+    private func unauthorizedBody(file: StaticString = #filePath, line: UInt = #line,
+                                  _ operation: () async throws -> Void) async -> Data? {
+        do {
+            try await operation()
+            XCTFail("Expected error", file: file, line: line)
+        } catch APIError.unauthorized(let data) {
+            return data
+        } catch {
+            XCTFail("Unexpected: \(error)", file: file, line: line)
+        }
+        return nil
+    }
+
+    /// The request fails with the 401 whose refresh failed, body included.
+    func test_rejectedRefresh_throwsUnauthorizedWithBody() async {
         StubProtocol.reset { Self.respond(to: $0, validToken: "access-1") }
         let server = RotatingAuthServer()
         let revoked = AuthTokens(accessToken: "access-0", refreshToken: "revoked")
         let client = makeClient(server: server, store: MockTokenStore(initial: revoked))
 
-        do {
-            _ = try await client.send(EchoEndpoint(), as: Echo.self)
-            XCTFail("Expected error")
-        } catch APIError.unauthorized {
-            // ok
-        } catch {
-            XCTFail("Unexpected: \(error)")
-        }
+        let body = await unauthorizedBody { _ = try await client.send(EchoEndpoint(), as: Echo.self) }
+
+        XCTAssertEqual(body, Self.rejection)
         XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
         let refreshCount = await server.refreshCount
         XCTAssertEqual(refreshCount, 1)
+    }
+
+    func test_rejectedRefresh_multipartUpload_throwsUnauthorizedWithBody() async {
+        StubProtocol.reset { Self.respond(to: $0, validToken: "access-1") }
+        let server = RotatingAuthServer()
+        let revoked = AuthTokens(accessToken: "access-0", refreshToken: "revoked")
+        let client = makeClient(server: server, store: MockTokenStore(initial: revoked))
+
+        let body = await unauthorizedBody { _ = try await client.upload(AvatarUploadEndpoint(), as: Echo.self) }
+
+        XCTAssertEqual(body, Self.rejection)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+    }
+
+    /// `download` discards the body of a failed attempt, so the 401 carries none, as other statuses do.
+    func test_rejectedRefresh_download_throwsUnauthorizedWithoutBody() async {
+        StubProtocol.reset { Self.respond(to: $0, validToken: "access-1") }
+        let server = RotatingAuthServer()
+        let revoked = AuthTokens(accessToken: "access-0", refreshToken: "revoked")
+        let client = makeClient(server: server, store: MockTokenStore(initial: revoked))
+
+        let body = await unauthorizedBody {
+            _ = try await client.download(FileEndpoint(),
+                                          to: .temporary(filename: "NetworkingKitTests-\(UUID().uuidString)"))
+        }
+
+        XCTAssertNil(body)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+    }
+
+    func test_emptyTokenStore_throwsUnauthorizedWithBody() async {
+        StubProtocol.reset { Self.respond(to: $0, validToken: "access-1") }
+        let server = RotatingAuthServer()
+        let client = makeClient(server: server, store: MockTokenStore())
+
+        let body = await unauthorizedBody { _ = try await client.send(EchoEndpoint(), as: Echo.self) }
+
+        XCTAssertEqual(body, Self.rejection)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+        let refreshCount = await server.refreshCount
+        XCTAssertEqual(refreshCount, 0)
+    }
+
+    func test_exhaustedRefreshWindow_throwsUnauthorizedWithBody() async {
+        StubProtocol.reset { Self.respond(to: $0, validToken: "access-1") }
+        let server = RotatingAuthServer()
+        let client = makeClient(server: server,
+                                store: MockTokenStore(initial: Self.initialTokens),
+                                refreshWindow: .init(interval: 30, maximumRefreshes: 0))
+
+        let body = await unauthorizedBody { _ = try await client.send(EchoEndpoint(), as: Echo.self) }
+
+        XCTAssertEqual(body, Self.rejection)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+        let refreshCount = await server.refreshCount
+        XCTAssertEqual(refreshCount, 0)
     }
 
     func test_transportErrorAfter401Refresh_doesNotRefreshAgain() async {

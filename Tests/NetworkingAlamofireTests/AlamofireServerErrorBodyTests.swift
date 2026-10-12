@@ -24,7 +24,7 @@ private struct MultipartEndpoint: APIEndpoint {
     }
 }
 
-/// Non-2xx responses other than 401/403/404 must reach `APIError.server` with the response body,
+/// Non-2xx responses must reach their `APIError` case with the response body,
 /// checked through the real Alamofire transport.
 final class AlamofireServerErrorBodyTests: XCTestCase {
 
@@ -106,6 +106,77 @@ final class AlamofireServerErrorBodyTests: XCTestCase {
         let client = makeClient()
         await assertServerError(status: 400) {
             _ = try await client.upload(MultipartEndpoint(), as: Echo.self)
+        }
+    }
+
+    // MARK: - 401, 403 and 404
+
+    /// The body of the case `error` must be for `status`; fails the test for any other error.
+    private static func statusCaseBody(_ error: any Error, status: Int, _ context: String,
+                                       file: StaticString = #filePath, line: UInt = #line) -> Data? {
+        switch (status, error as? APIError) {
+        case (401, .unauthorized(let data)?), (403, .forbidden(let data)?), (404, .notFound(let data)?):
+            return data
+        default:
+            XCTFail("\(context): unexpected \(error)", file: file, line: line)
+            return nil
+        }
+    }
+
+    private static func operations(_ client: some APIClientProtocol) -> [(String, () async throws -> Void)] {
+        [
+            ("send", { _ = try await client.send(EchoEndpoint(), as: Echo.self) }),
+            ("sendVoid", { try await client.sendVoid(CreateEndpoint()) }),
+            ("upload", { _ = try await client.upload(CreateEndpoint(), as: Echo.self) }),
+            ("multipart upload", { _ = try await client.upload(MultipartEndpoint(), as: Echo.self) }),
+        ]
+    }
+
+    func test_401_403_404_keepBody() async {
+        for status in [401, 403, 404] {
+            Self.stubError(status: status)
+            for (name, operation) in Self.operations(makeClient()) {
+                let context = "\(status) \(name)"
+                do {
+                    try await operation()
+                    XCTFail("\(context): expected error")
+                } catch {
+                    XCTAssertEqual(Self.statusCaseBody(error, status: status, context),
+                                   Self.envelope(status: status), context)
+                    XCTAssertEqual((error as? APIError)?.responseBody, Self.envelope(status: status), context)
+                    XCTAssertEqual((error as? APIError)?.statusCode, status, context)
+                }
+            }
+        }
+    }
+
+    func test_401_403_404_emptyBody_givesNilData() async {
+        for status in [401, 403, 404] {
+            StubProtocol.reset { _ in .init(statusCode: status, data: Data(), headers: [:], delay: 0) }
+            for (name, operation) in Self.operations(makeClient()) {
+                let context = "\(status) \(name)"
+                do {
+                    try await operation()
+                    XCTFail("\(context): expected error")
+                } catch {
+                    XCTAssertNil(Self.statusCaseBody(error, status: status, context), context)
+                }
+            }
+        }
+    }
+
+    /// `download` writes the body to a file it discards, so its status cases carry no body, as `.server` does.
+    func test_download_401_403_404_carryNoBody() async {
+        for status in [401, 403, 404] {
+            Self.stubError(status: status)
+            let context = "\(status) download"
+            do {
+                _ = try await makeClient()
+                    .download(EchoEndpoint(), to: .temporary(filename: "NetworkingKitTests-\(UUID().uuidString)"))
+                XCTFail("\(context): expected error")
+            } catch {
+                XCTAssertNil(Self.statusCaseBody(error, status: status, context), context)
+            }
         }
     }
 

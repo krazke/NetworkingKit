@@ -28,14 +28,27 @@ final class MockAPIClientTests: XCTestCase {
         XCTAssertEqual(result, Horse(id: 1, name: "Bucephalus"))
     }
 
-    func test_send_throwsStubbedFailure() async {
+    func test_send_throwsStubbedFailureWithItsBody() async {
         let client = MockAPIClient()
-        await client.stub(path: "/horses/1", with: .failure(.notFound))
+        let envelope = Data(#"{"error":"no such horse"}"#.utf8)
+        await client.stub(path: "/horses/1", with: .failure(.notFound(data: envelope)))
         do {
             _ = try await client.send(GetHorse(horseId: 1), as: Horse.self)
             XCTFail("Expected error")
-        } catch APIError.notFound {
-            // ok
+        } catch APIError.notFound(let data) {
+            XCTAssertEqual(data, envelope)
+        } catch {
+            XCTFail("Unexpected: \(error)")
+        }
+    }
+
+    func test_unstubbedPath_throwsNotFoundWithoutBody() async {
+        let client = MockAPIClient()
+        do {
+            _ = try await client.send(GetHorse(horseId: 1), as: Horse.self)
+            XCTFail("Expected error")
+        } catch APIError.notFound(let data) {
+            XCTAssertNil(data)
         } catch {
             XCTFail("Unexpected: \(error)")
         }

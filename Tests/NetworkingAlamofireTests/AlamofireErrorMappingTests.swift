@@ -126,7 +126,7 @@ final class AlamofireErrorMappingTests: XCTestCase {
     func test_adaptThrowingAPIError_passesItThrough() async {
         Self.stub(Self.json(#"{"value":"ok"}"#))
         do {
-            _ = try await makeClient(additional: [ThrowingAdapter(error: APIError.forbidden)])
+            _ = try await makeClient(additional: [ThrowingAdapter(error: APIError.forbidden(data: nil))])
                 .send(EchoEndpoint(), as: Echo.self)
             XCTFail("Expected error")
         } catch APIError.forbidden {

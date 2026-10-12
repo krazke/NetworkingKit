@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 330 XCTest cases (Core 67, URLSession 130, WebSocket 5, Alamofire 128). All 330 passed on 2026-10-09 with Xcode 27.0 / Swift 6.4.
+The suite contains 351 XCTest cases (Core 72, URLSession 138, WebSocket 5, Alamofire 136). All 351 passed on 2026-10-12 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -54,7 +54,7 @@ In the consumer's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/<your-org>/NetworkingKit.git", from: "1.0.0"),
+    .package(url: "https://github.com/<your-org>/NetworkingKit.git", from: "1.2.0"),
 ],
 targets: [
     .target(
@@ -80,6 +80,14 @@ targets: [
 ```
 
 The package is not published; the URL above is a placeholder. In Xcode, use **File → Add Package Dependencies…** and attach each library product to the target that needs it.
+
+## Upgrading from 1.1.x to 1.2.0
+
+1.2.0 changes public cases of `APIError`. Such a change would normally need a major release; it ships as a minor release because no app depends on the package yet.
+
+- `.unauthorized`, `.forbidden` and `.notFound` carry the response body: `.unauthorized(data: Data?)`, `.forbidden(data: Data?)` and `.notFound(data: Data?)`. `data` follows the rules of `.server`'s `data`: `nil` when the body is empty, and for `download`. A request whose 401 is not refreshed, because `refreshAction` throws, the `TokenStore` is empty or `refreshWindow` is exhausted, fails with the body of that 401.
+- Code that matches these cases without binding the body, such as `catch APIError.unauthorized` or `case .notFound:`, compiles unchanged. Code that creates them must pass the body: `throw APIError.unauthorized` becomes `throw APIError.unauthorized(data: nil)`, and a `MockAPIClient` stub `.failure(.notFound)` becomes `.failure(.notFound(data: nil))`.
+- `APIError.statusCode` and `APIError.responseBody` are new. They return the status and body of any non-2xx failure, so an app can decode its error format in one place (see [Errors](#errors)).
 
 ## Usage
 
@@ -230,7 +238,7 @@ Cancelling the calling task ends the request with `APIError.cancelled`, also whi
 - Concurrent 401s share one in-flight refresh, so a rotating (single-use) refresh token is spent exactly once.
 - A 401 for a request sent with an older access token than the stored one is retried with the current token without another refresh.
 - Refresh does not depend on the attempt number: a request that got a 503, was retried and then got a 401 still refreshes.
-- Refreshes are limited by `NetworkConfiguration.refreshWindow` (default: at most 5 within 30 seconds). Beyond that limit, or when `refreshAction` throws, the request fails with `APIError.unauthorized` instead of looping.
+- Refreshes are limited by `NetworkConfiguration.refreshWindow` (default: at most 5 within 30 seconds). Beyond that limit, or when `refreshAction` throws or the `TokenStore` is empty, the request fails with `APIError.unauthorized` carrying the body of that 401, instead of looping.
 
 **Retry with backoff.**
 
@@ -270,7 +278,7 @@ An interceptor in `additionalInterceptors` that decides to retry runs before `Re
 | Situation | `retry` called | `response` | `error` |
 |---|---|---|---|
 | Building the request or its multipart body fails, or `adapt` throws | No; the request fails at once with the `APIError` listed under [Errors](#errors) | — | — |
-| Non-2xx status | Yes | The attempt's `HTTPURLResponse` | The `APIError` the request fails with if it is not retried: `.unauthorized`, `.forbidden`, `.notFound`, or `.server` carrying the response body (`nil` when the body is empty, and for `download`) |
+| Non-2xx status | Yes | The attempt's `HTTPURLResponse` | The `APIError` the request fails with if it is not retried: `.unauthorized`, `.forbidden`, `.notFound` or `.server`, carrying the response body (`nil` when the body is empty, and for `download`) |
 | Transport failure, including `.secureConnectionFailed` | Yes | `nil`, also when an earlier attempt received a response | The `URLError`; the request fails with `.transport` wrapping it |
 | A pinned host's server trust is rejected | No; the request fails at once with `.transport` wrapping a `PinningError` (see [SSL pinning](#ssl-pinning)) | — | — |
 | The system rejects the certificate of a host without pinning | No; the request fails at once with `.transport` wrapping the `URLError` (see [SSL pinning](#ssl-pinning)) | — | — |
@@ -290,7 +298,7 @@ Both transports throw only `APIError` and map each failure to the same case:
 
 | Failure | `APIError` |
 |---|---|
-| 401, 403, 404 | `.unauthorized`, `.forbidden`, `.notFound` |
+| 401, 403, 404 | `.unauthorized(data:)`, `.forbidden(data:)`, `.notFound(data:)` |
 | Any other non-2xx status | `.server(statusCode:data:message:)` |
 | A response that is not an `HTTPURLResponse`, whatever its body; the response type is checked before the body is decoded | `.invalidResponse` |
 | A `RequestBody.json` value fails to encode | `.encoding` |
@@ -306,7 +314,22 @@ Both transports throw only `APIError` and map each failure to the same case:
 | The calling task is cancelled, a request fails with `URLError.cancelled` for any other reason than a rejected server trust, or `adapt` throws `CancellationError` | `.cancelled` |
 | A downloaded file cannot be placed at its destination | `.transport` with a `CocoaError` (see [Download](#download)) |
 
-For `send`, `sendVoid` and `upload`, `.server` carries the raw response body in `data`, or `nil` when the body is empty, so the app can decode its API's error format from it; `message` is a human-readable status description whose wording differs between transports. 401, 403 and 404 carry no body, because their cases have no associated values. `download` failures carry no body either.
+For `send`, `sendVoid` and `upload`, every non-2xx case carries the raw response body in `data`, or `nil` when the body is empty, so the app can decode its API's error format from it. `download` failures carry no body, because the transports write it to a file that they discard. `statusCode` and `responseBody` return the status and body whatever the case, and `nil` for a failure without a non-2xx response. `description` omits the body, which can be large or carry personal data. `.server`'s `message` is a human-readable status description whose wording differs between transports.
+
+```swift
+do {
+    try await client.sendVoid(endpoint)
+} catch let error as APIError {
+    // `ErrorEnvelope` is the app's own Decodable error format.
+    if let body = error.responseBody,
+       let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: body) {
+        // Show `envelope`'s message, or map its error code.
+    }
+    if case .unauthorized = error {
+        // Sign out.
+    }
+}
+```
 
 Match on the case rather than on the wrapped error. The `URLError`, `CocoaError` and `PinningError` values named above are the same in both transports. Otherwise the wrapped error of `.encoding`, `.decoding` and `.unknown` is an internal wrapper whose description includes the original error, and it differs between transports. Failures that only Alamofire produces become `.transport` with a wrapper around the `AFError`: a server trust rejected for a host without an evaluator (`noRequiredEvaluator`) and a GET request with a body.
 
@@ -489,7 +512,7 @@ final class HorsesServiceTests: XCTestCase {
 
     func test_create_propagatesNotFound() async {
         let client = MockAPIClient()
-        await client.stub(path: "horses", with: .failure(.notFound))
+        await client.stub(path: "horses", with: .failure(.notFound(data: nil)))
         do {
             _ = try await HorsesService(client: client).create(.mock)
             XCTFail("Expected an error")
@@ -501,7 +524,7 @@ final class HorsesServiceTests: XCTestCase {
 }
 ```
 
-Stubs are keyed by the exact `endpoint.path` string ("horses", not "/horses"). Unstubbed paths fail with `.notFound` unless `setDefaultStub(_:)` is called. `StubResponse` also offers `.successData(Data)`, `.void` and `.delayed(seconds, inner)`. `MockTokenStore` counts `save` and `clear` calls, and `RecordingInterceptor` records `adapt` and `retry` calls.
+Stubs are keyed by the exact `endpoint.path` string ("horses", not "/horses"). Unstubbed paths fail with `.notFound(data: nil)` unless `setDefaultStub(_:)` is called. A failure stub can carry an error body, such as `.failure(.forbidden(data: envelope))`. `StubResponse` also offers `.successData(Data)`, `.void` and `.delayed(seconds, inner)`. `MockTokenStore` counts `save` and `clear` calls, and `RecordingInterceptor` records `adapt` and `retry` calls.
 
 ## Migrating from Moya
 
@@ -513,7 +536,7 @@ Stubs are keyed by the exact `endpoint.path` string ("horses", not "/horses"). U
 | `NetworkLoggerPlugin` | An app-defined `NetworkLogger` passed as `NetworkConfiguration.logger` (`ConsoleNetworkLogger` for development) |
 | Multipart target | `RequestBody.multipart([MultipartPart])` |
 | Background-transfer plugin | Not supported: Alamofire rejects background session configurations, and `URLSessionAPIClient` uses async APIs that background sessions do not support |
-| Error handler | The `APIError` enum |
+| Error handler | The `APIError` enum; decode the error envelope from `responseBody` for any non-2xx status |
 | `provider.request(.case)` | `client.send(Endpoint(), as: T.self)` |
 | Stubbing closures | `MockAPIClient.stub(path:with:)` |
 
@@ -527,10 +550,10 @@ The package is a prototype. The issues below were confirmed by reading the code,
 
 **Alamofire transport**
 - `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets). Since 1.1.1 a host whose pin list is empty or unparsable counts as pinned too.
+- A non-2xx status outside 400–599, such as 300 or 304, fails with `.transport` wrapping the `AFError`, and `retry` gets that error, while the URLSession transport throws `.server` with the status and body. `AlamofireAPIClient.mapError` maps only `400..<600` to a status case. Confirmed by a throwaway test for 300 and 304.
 
 **Both transports**
 - A failed client-certificate handshake is retried like any transport error. Only the four server trust codes listed under [SSL pinning](#ssl-pinning) skip `retry`, so `.clientCertificateRejected` (-1205) and `.clientCertificateRequired` (-1206) reach `RetryInterceptor`, which sends the request again for a method in `retryableMethods`, up to `limit` attempts. Neither transport answers a client-certificate challenge itself: URLSession, `PinningDelegate` and Alamofire's `SessionDelegate` give it default handling, so another attempt meets the same credentials and most likely fails the same way.
-- `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases; it is planned for the next minor release, since no app depends on the package yet.
 
 **NetworkingCore**
 - `RetryConfiguration` does not validate its fields. A `jitter` range with an infinite bound makes `delay(for:)` trap ("There is no uniform distribution on an infinite range" from `Double.random(in:)`), so the first failure that `RetryInterceptor` would retry with backoff crashes either transport. A `maxDelay` of `.nan` makes every backoff delay NaN, because `min(.nan, x)` is NaN; the transports then do not retry, so transport errors and retryable statuses without `Retry-After` silently get no retries.

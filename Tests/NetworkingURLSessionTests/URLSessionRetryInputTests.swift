@@ -205,20 +205,50 @@ final class URLSessionRetryInputTests: XCTestCase {
         }
     }
 
-    func test_401_403_404_passTheirAPIError() async {
+    /// The body of the case `error` must be for `status`; fails the test for any other error.
+    private static func statusCaseBody(_ error: (any Error)?, status: Int, _ context: String,
+                                       file: StaticString = #filePath, line: UInt = #line) -> Data? {
+        switch (status, error as? APIError) {
+        case (401, .unauthorized(let data)?), (403, .forbidden(let data)?), (404, .notFound(let data)?):
+            return data
+        default:
+            XCTFail("\(context): unexpected \(String(describing: error))", file: file, line: line)
+            return nil
+        }
+    }
+
+    func test_401_403_404_passTheirAPIErrorWithBody() async {
+        let parts: [MultipartPart] = [.data(Data("bytes".utf8), name: "file", filename: "a.bin", mimeType: nil)]
+        for code in [401, 403, 404] {
+            for (name, isUpload) in [("sendVoid", false), ("multipart upload", true)] {
+                Self.stub(Self.status(code, body: "denied"))
+                let recorder = RetryInputRecorder()
+                let client = makeClient(recorder, retry: .none)
+                if isUpload {
+                    _ = try? await client.upload(MultipartEndpoint(parts: parts, method: .post), as: Echo.self)
+                } else {
+                    _ = try? await client.sendVoid(EchoEndpoint())
+                }
+
+                let calls = await recorder.calls
+                let context = "\(code) \(name)"
+                XCTAssertEqual(calls.map(\.statusCode), [code], context)
+                XCTAssertEqual(Self.statusCaseBody(calls.first?.error, status: code, context),
+                               Data("denied".utf8), context)
+            }
+        }
+    }
+
+    func test_download401_403_404_passTheirAPIErrorWithoutBody() async {
         for code in [401, 403, 404] {
             Self.stub(Self.status(code, body: "denied"))
             let recorder = RetryInputRecorder()
-            _ = try? await makeClient(recorder, retry: .none).sendVoid(EchoEndpoint())
+            _ = try? await makeClient(recorder, retry: .none)
+                .download(EchoEndpoint(), to: .temporary(filename: "NetworkingKitTests-\(UUID().uuidString)"))
 
             let calls = await recorder.calls
-            XCTAssertEqual(calls.map(\.statusCode), [code])
-            switch (code, calls.first?.error as? APIError) {
-            case (401, .unauthorized?), (403, .forbidden?), (404, .notFound?):
-                break
-            default:
-                XCTFail("Unexpected error for \(code): \(String(describing: calls.first?.error))")
-            }
+            XCTAssertEqual(calls.map(\.statusCode), [code], "\(code)")
+            XCTAssertNil(Self.statusCaseBody(calls.first?.error, status: code, "\(code) download"))
         }
     }
 
