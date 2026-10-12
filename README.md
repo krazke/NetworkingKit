@@ -530,7 +530,7 @@ The package is a prototype. The issues below were confirmed by reading the code,
 
 **Both transports**
 - A failed client-certificate handshake is retried like any transport error. Only the four server trust codes listed under [SSL pinning](#ssl-pinning) skip `retry`, so `.clientCertificateRejected` (-1205) and `.clientCertificateRequired` (-1206) reach `RetryInterceptor`, which sends the request again for a method in `retryableMethods`, up to `limit` attempts. Neither transport answers a client-certificate challenge itself: URLSession, `PinningDelegate` and Alamofire's `SessionDelegate` give it default handling, so another attempt meets the same credentials and most likely fails the same way.
-- `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases and is planned for 2.0.0.
+- `.unauthorized`, `.forbidden` and `.notFound` drop the response body, so error envelopes sent with 401, 403 or 404 are lost. Fixing this changes `APIError`'s public cases; it is planned for the next minor release, since no app depends on the package yet.
 
 **NetworkingCore**
 - `RetryConfiguration` does not validate its fields. A `jitter` range with an infinite bound makes `delay(for:)` trap ("There is no uniform distribution on an infinite range" from `Double.random(in:)`), so the first failure that `RetryInterceptor` would retry with backoff crashes either transport. A `maxDelay` of `.nan` makes every backoff delay NaN, because `min(.nan, x)` is NaN; the transports then do not retry, so transport errors and retryable statuses without `Retry-After` silently get no retries.
