@@ -1,11 +1,15 @@
 import Foundation
 
-/// Политика SSL pinning. Транспорт сам выполняет валидацию по этим данным.
+/// How a transport checks one host's server trust, as a value in `NetworkConfiguration.pinning`.
+///
+/// The keys of `pinning` are compared exactly with the host the server trust challenge names, which URLSession
+/// lowercases. A host that is not a key, or whose policy is `.none`, gets the system's trust evaluation without
+/// pins in both transports, also while other hosts are pinned.
 public enum PinningPolicy: Sendable {
-    /// Без pinning — стандартная системная цепочка.
+    /// No pinning: the system's trust evaluation only.
     case none
-    /// Public-key pinning. Передаётся набор DER-сертификатов; ключи из них извлекаются.
+    /// Public-key pinning. Takes DER-encoded certificates; the keys are extracted from them.
     case publicKeys([Data])
-    /// Certificate pinning — побайтовое сравнение DER-сертификатов.
+    /// Certificate pinning: a byte-for-byte comparison of DER-encoded certificates.
     case certificates([Data])
 }

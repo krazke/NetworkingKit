@@ -18,9 +18,9 @@ private struct UploadEndpoint: APIEndpoint {
 /// What a request to a host without pinning throws when the system rejects its server trust, and that `retry`
 /// is not asked about it.
 ///
-/// No host is pinned, so the session has no `ServerTrustManager` and URLSession evaluates the trust itself. With
-/// another host pinned, Alamofire rejects this host with `noRequiredEvaluator` instead, which
-/// `AlamofirePinningFailureTests` covers. The TLS tests connect to `LoopbackTLSServer`. Its certificate is self-signed, so URLSession reports every case,
+/// URLSession evaluates the trust itself: the session has no `ServerTrustManager` when no host is pinned, and the
+/// manager has no evaluator for this host when another host is pinned. The TLS tests connect to
+/// `LoopbackTLSServer`. Its certificate is self-signed, so URLSession reports every case,
 /// the expired certificate and the wrong host included, as `.serverCertificateUntrusted`; the other trust failure
 /// codes need a chain the system trusts, and `StubProtocol` fails the request with them instead.
 /// `URLSessionUnpinnedTrustTests` checks the same behavior for the URLSession transport.
@@ -57,6 +57,19 @@ final class AlamofireUnpinnedTrustTests: XCTestCase {
     /// The certificate is issued for the IP address 127.0.0.1, not for `localhost`.
     func testCertificateForAnotherHostOverTLSThrowsURLErrorWithoutRetry() async throws {
         try await assertRejectedOverTLS(presenting: LoopbackTLSServer.certificate, host: "localhost")
+    }
+
+    /// With another host pinned, this host has no evaluator and gets default handling, as in the URLSession
+    /// transport. Before 1.2.1 it failed with `noRequiredEvaluator`.
+    func testUntrustedRootWhileAnotherHostIsPinnedThrowsURLErrorWithoutRetry() async throws {
+        try await assertRejectedOverTLS(presenting: LoopbackTLSServer.certificate,
+                                        pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf])])
+    }
+
+    func testUntrustedRootOfExplicitlyUnpinnedHostThrowsURLErrorWithoutRetry() async throws {
+        try await assertRejectedOverTLS(presenting: LoopbackTLSServer.certificate,
+                                        pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf]),
+                                                  LoopbackTLSServer.host: .none])
     }
 
     // MARK: - Trust failure codes
@@ -119,6 +132,7 @@ final class AlamofireUnpinnedTrustTests: XCTestCase {
 
     private func assertRejectedOverTLS(presenting certificate: Data,
                                        host: String = LoopbackTLSServer.host,
+                                       pinning: [String: PinningPolicy] = [:],
                                        file: StaticString = #filePath, line: UInt = #line) async throws {
         let server = try await LoopbackTLSServer(presenting: certificate)
         defer { server.stop() }
@@ -126,7 +140,7 @@ final class AlamofireUnpinnedTrustTests: XCTestCase {
         components.host = host
         let recorder = RecordingInterceptor()
         let client = makeClient(baseURL: try XCTUnwrap(components.url), sessionConfiguration: .ephemeral,
-                                recorder: recorder)
+                                pinning: pinning, recorder: recorder)
 
         try await assertTrustFailure(client, in: Self.serverTrustCodes, recorder: recorder, file: file, line: line) {
             try await $0.sendVoid(GetEndpoint())
@@ -168,9 +182,11 @@ final class AlamofireUnpinnedTrustTests: XCTestCase {
 
     private func makeClient(baseURL: URL,
                             sessionConfiguration: URLSessionConfiguration,
+                            pinning: [String: PinningPolicy] = [:],
                             recorder: RecordingInterceptor) -> AlamofireAPIClient {
         AlamofireAPIClient(configuration: NetworkConfiguration(baseURL: baseURL,
                                                                sessionConfiguration: sessionConfiguration,
+                                                               pinning: pinning,
                                                                retry: Self.retry,
                                                                additionalInterceptors: [recorder]))
     }

@@ -11,6 +11,11 @@ enum ServerTrustFactory {
     /// `PinningDelegate` does in the URLSession transport. A host whose list is empty or holds no certificate that
     /// can be parsed gets an evaluator that rejects every trust: no pin can match, and skipping the host would
     /// leave it unpinned.
+    ///
+    /// A host outside `pinning` or with `.none` has no evaluator, and the manager does not require one, so
+    /// `SessionDelegate` gives its challenge default handling, as `PinningDelegate` does. Alamofire's default,
+    /// `allHostsMustBeEvaluated: true`, would fail such a host with `noRequiredEvaluator` once any host is pinned,
+    /// including CDN hosts and redirect targets.
     static func makeManager(_ pinning: [String: PinningPolicy]) -> ServerTrustManager? {
         var evaluators: [String: ServerTrustEvaluating] = [:]
 
@@ -35,7 +40,7 @@ enum ServerTrustFactory {
             }
         }
 
-        return evaluators.isEmpty ? nil : ServerTrustManager(evaluators: evaluators)
+        return evaluators.isEmpty ? nil : ServerTrustManager(allHostsMustBeEvaluated: false, evaluators: evaluators)
     }
 
     /// Rejects every trust: the system's evaluation first, then `noCertificatesFound`, which

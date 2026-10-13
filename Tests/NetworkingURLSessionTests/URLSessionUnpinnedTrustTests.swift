@@ -63,6 +63,12 @@ final class URLSessionUnpinnedTrustTests: XCTestCase {
                                         pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf])])
     }
 
+    func testUntrustedRootOfExplicitlyUnpinnedHostThrowsURLErrorWithoutRetry() async throws {
+        try await assertRejectedOverTLS(presenting: LoopbackTLSServer.certificate,
+                                        pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf]),
+                                                  LoopbackTLSServer.host: .none])
+    }
+
     // MARK: - Trust failure codes
 
     func testBadDateIsNotRetried() async throws {

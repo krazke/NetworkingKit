@@ -16,7 +16,8 @@ private struct UploadEndpoint: APIEndpoint {
     var body: RequestBody { .multipart([.data(Data("x".utf8), name: "file")]) }
 }
 
-/// What a request to a pinned host whose server trust is rejected throws, and that `retry` is not asked about it.
+/// What a request to a pinned host whose server trust is rejected throws, and that `retry` is not asked about it;
+/// also that a host without pins beside a pinned one is left to URLSession's default handling.
 ///
 /// The client runs on the session `AlamofireAPIClient(configuration:)` builds, with the `ServerTrustManager` from
 /// `ServerTrustFactory`. `StubProtocol` answers each request's server trust challenge through that session's
@@ -126,34 +127,18 @@ final class AlamofirePinningFailureTests: XCTestCase {
         XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
     }
 
-    /// An unpinned host while another host is pinned fails with Alamofire's `noRequiredEvaluator`
-    /// (see the known issues). That is not a pin failure, but it is not retried either.
-    func testUnpinnedHostWithoutEvaluatorIsNotRetried() async throws {
-        let recorder = RecordingInterceptor()
-        let client = makeClient(host: PinningFixtures.wrongHost,
-                                pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf])],
-                                presenting: PinningFixtures.leaf,
-                                anchored: true,
-                                recorder: recorder)
+    // MARK: - Hosts without pins
 
-        do {
-            try await client.sendVoid(GetEndpoint())
-            XCTFail("Expected APIError.transport")
-        } catch APIError.transport(let error) {
-            let reason = ((error as? NonSendableErrorBox)?.underlying as? AFError).flatMap { af -> AFError.ServerTrustFailureReason? in
-                if case .serverTrustEvaluationFailed(let reason) = af { return reason } else { return nil }
-            }
-            guard case .noRequiredEvaluator(let host) = reason else {
-                return XCTFail("Expected AFError.serverTrustEvaluationFailed(.noRequiredEvaluator), got \(error)")
-            }
-            XCTAssertEqual(host, PinningFixtures.wrongHost)
-        } catch {
-            XCTFail("Expected APIError.transport, got \(error)")
-        }
+    /// A host outside `pinning` gets default handling while another host is pinned, so the system evaluates its
+    /// trust without pins. Before 1.2.1 it failed with Alamofire's `noRequiredEvaluator`.
+    func testUnlistedHostBesidePinnedHostGetsDefaultHandling() async throws {
+        try await assertDefaultHandling(pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf])])
+    }
 
-        let retries = await recorder.retryAttempts.count
-        XCTAssertEqual(retries, 0)
-        XCTAssertEqual(StubProtocol.recordedRequests.count, 1)
+    /// `.none` leaves a host unpinned. Before 1.2.1 such a host failed with `noRequiredEvaluator` beside a pinned one.
+    func testExplicitlyUnpinnedHostBesidePinnedHostGetsDefaultHandling() async throws {
+        try await assertDefaultHandling(pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf]),
+                                                  Self.unpinnedHost: .none])
     }
 
     // MARK: - Accepted trust
@@ -172,6 +157,30 @@ final class AlamofirePinningFailureTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// A host without pins that `PinningFixtures.leaf` is issued for, so the system would trust its chain.
+    private static let unpinnedHost = "localhost"
+
+    /// Requests `unpinnedHost` and expects the delegate to leave its challenge to URLSession's default handling,
+    /// neither accepting nor rejecting the trust itself.
+    private func assertDefaultHandling(pinning: [String: PinningPolicy],
+                                       file: StaticString = #filePath, line: UInt = #line) async throws {
+        let recorder = RecordingInterceptor()
+        let dispositions = RecordedDispositions()
+        let client = makeClient(host: Self.unpinnedHost,
+                                pinning: pinning,
+                                presenting: PinningFixtures.leaf,
+                                anchored: true,
+                                recorder: recorder,
+                                dispositions: dispositions)
+
+        try await client.sendVoid(GetEndpoint())
+
+        XCTAssertEqual(dispositions.all, [.performDefaultHandling], file: file, line: line)
+        let retries = await recorder.retryAttempts.count
+        XCTAssertEqual(retries, 0, file: file, line: line)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1, file: file, line: line)
+    }
 
     private func assertRejected(host: String = PinningFixtures.host,
                                 presenting certificate: Data,
@@ -201,12 +210,13 @@ final class AlamofirePinningFailureTests: XCTestCase {
     }
 
     /// A client for `https://<host>/` that allows three attempts, so a retried trust failure would be sent again.
-    /// Every request's challenge presents `certificate`.
+    /// Every request's challenge presents `certificate`; `dispositions` records the delegate's answers.
     private func makeClient(host: String,
                             pinning: [String: PinningPolicy],
                             presenting certificate: Data,
                             anchored: Bool,
-                            recorder: RecordingInterceptor) -> AlamofireAPIClient {
+                            recorder: RecordingInterceptor,
+                            dispositions: RecordedDispositions? = nil) -> AlamofireAPIClient {
         let configuration = NetworkConfiguration(baseURL: URL(string: "https://\(host)/")!,
                                                  sessionConfiguration: .stubbed,
                                                  pinning: pinning,
@@ -223,11 +233,24 @@ final class AlamofirePinningFailureTests: XCTestCase {
                     let trust = PinningFixtures.serverTrust(presenting: certificate, forHost: host, anchored: anchored)
                     session.delegate.urlSession(session.session, task: task,
                                                 didReceive: ServerTrustChallenge.make(host: host, trust: trust)) { disposition, _ in
+                        dispositions?.append(disposition)
                         answer(disposition)
                     }
                 }
             }
         )
         return AlamofireAPIClient(session: session, configuration: configuration)
+    }
+}
+
+/// The answers a client's delegate gave to the server trust challenges that `StubProtocol` passed to it.
+private final class RecordedDispositions: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [URLSession.AuthChallengeDisposition] = []
+
+    var all: [URLSession.AuthChallengeDisposition] { lock.withLock { recorded } }
+
+    func append(_ disposition: URLSession.AuthChallengeDisposition) {
+        lock.withLock { recorded.append(disposition) }
     }
 }

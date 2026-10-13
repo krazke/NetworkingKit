@@ -255,8 +255,9 @@ public final class AlamofireAPIClient: APIClientProtocol {
         }
     }
 
-    /// The `PinningError` for a pinned host's rejected server trust, or `nil` for `noRequiredEvaluator`, which an
-    /// unpinned host gets while another host is pinned, and for a reason without a host when `host` is `nil`.
+    /// The `PinningError` for a pinned host's rejected server trust, or `nil` for a reason without a host when
+    /// `host` is `nil` and for `noRequiredEvaluator`. The manager from `ServerTrustFactory` does not require an
+    /// evaluator for every host, so only a custom `ServerTrustManager` throws it, and the host it names is not pinned.
     private static func pinningError(for reason: AFError.ServerTrustFailureReason, host: String?) -> PinningError? {
         switch reason {
         case .noRequiredEvaluator:

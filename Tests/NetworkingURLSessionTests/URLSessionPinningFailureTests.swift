@@ -15,7 +15,8 @@ private struct UploadEndpoint: APIEndpoint {
     var body: RequestBody { .multipart([.data(Data("x".utf8), name: "file")]) }
 }
 
-/// What a request to a pinned host whose server trust is rejected throws, and that `retry` is not asked about it.
+/// What a request to a pinned host whose server trust is rejected throws, and that `retry` is not asked about it;
+/// also that a host without pins beside a pinned one is left to URLSession's default handling.
 ///
 /// `StubProtocol` answers each request's server trust challenge with the client's own `PinningDelegate`, using
 /// a trust from `PinningFixtures`, and fails the request with `URLError.cancelled` when the delegate cancels the
@@ -100,6 +101,19 @@ final class URLSessionPinningFailureTests: XCTestCase {
                                  as: .pinMismatch)
     }
 
+    // MARK: - Hosts without pins
+
+    /// A host outside `pinning` gets default handling while another host is pinned, so the system evaluates its
+    /// trust without pins.
+    func testUnlistedHostBesidePinnedHostGetsDefaultHandling() async throws {
+        try await assertDefaultHandling(pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf])])
+    }
+
+    func testExplicitlyUnpinnedHostBesidePinnedHostGetsDefaultHandling() async throws {
+        try await assertDefaultHandling(pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf]),
+                                                  Self.unpinnedHost: .none])
+    }
+
     // MARK: - Accepted trust
 
     /// Guards the setup: a challenge the delegate accepts lets the request through.
@@ -108,7 +122,7 @@ final class URLSessionPinningFailureTests: XCTestCase {
         let client = try makeClient(host: PinningFixtures.host,
                                     presenting: PinningFixtures.leaf,
                                     anchored: true,
-                                    pin: .certificates([PinningFixtures.leaf]),
+                                    pinning: [PinningFixtures.host: .certificates([PinningFixtures.leaf])],
                                     recorder: recorder)
 
         try await client.sendVoid(GetEndpoint())
@@ -117,6 +131,31 @@ final class URLSessionPinningFailureTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// A host without pins that `PinningFixtures.leaf` is issued for, so the system would trust its chain.
+    private static let unpinnedHost = "localhost"
+
+    /// Requests `unpinnedHost` and expects the delegate to leave its challenge to URLSession's default handling,
+    /// neither accepting nor rejecting the trust itself.
+    private func assertDefaultHandling(pinning: [String: PinningPolicy],
+                                       file: StaticString = #filePath, line: UInt = #line) async throws {
+        let recorder = RecordingInterceptor()
+        let dispositions = RecordedDispositions()
+        let client = try makeClient(host: Self.unpinnedHost,
+                                    presenting: PinningFixtures.leaf,
+                                    anchored: true,
+                                    pinning: pinning,
+                                    recorder: recorder,
+                                    dispositions: dispositions,
+                                    file: file, line: line)
+
+        try await client.sendVoid(GetEndpoint())
+
+        XCTAssertEqual(dispositions.all, [.performDefaultHandling], file: file, line: line)
+        let retries = await recorder.retryAttempts.count
+        XCTAssertEqual(retries, 0, file: file, line: line)
+        XCTAssertEqual(StubProtocol.recordedRequests.count, 1, file: file, line: line)
+    }
 
     private func assertRejected(host: String = PinningFixtures.host,
                                 presenting certificate: Data,
@@ -128,7 +167,7 @@ final class URLSessionPinningFailureTests: XCTestCase {
                                     try await $0.sendVoid(GetEndpoint())
                                 }) async throws {
         let recorder = RecordingInterceptor()
-        let client = try makeClient(host: host, presenting: certificate, anchored: anchored, pin: pin,
+        let client = try makeClient(host: host, presenting: certificate, anchored: anchored, pinning: [host: pin],
                                     recorder: recorder)
 
         do {
@@ -145,17 +184,18 @@ final class URLSessionPinningFailureTests: XCTestCase {
         XCTAssertEqual(StubProtocol.recordedRequests.count, 1, file: file, line: line)
     }
 
-    /// A client for `https://<host>/` that pins `host` and allows three attempts, so a retried pin failure
-    /// would be sent again. Every request's challenge presents `certificate`.
+    /// A client for `https://<host>/` that allows three attempts, so a retried pin failure would be sent again.
+    /// Every request's challenge presents `certificate`; `dispositions` records the delegate's answers.
     private func makeClient(host: String,
                             presenting certificate: Data,
                             anchored: Bool,
-                            pin: PinningPolicy,
+                            pinning: [String: PinningPolicy],
                             recorder: RecordingInterceptor,
+                            dispositions: RecordedDispositions? = nil,
                             file: StaticString = #filePath, line: UInt = #line) throws -> URLSessionAPIClient {
         let configuration = NetworkConfiguration(baseURL: URL(string: "https://\(host)/")!,
                                                  sessionConfiguration: .stubbed,
-                                                 pinning: [host: pin],
+                                                 pinning: pinning,
                                                  retry: RetryConfiguration(limit: 3, baseDelay: 0.01, maxDelay: 0.01),
                                                  additionalInterceptors: [recorder])
         let client = URLSessionAPIClient(configuration: configuration)
@@ -169,10 +209,23 @@ final class URLSessionPinningFailureTests: XCTestCase {
                 // The session argument is unused by `PinningDelegate`; the stub has no access to the real one.
                 delegate.urlSession(URLSession.shared,
                                     didReceive: ServerTrustChallenge.make(host: host, trust: trust)) { disposition, _ in
+                    dispositions?.append(disposition)
                     answer(disposition)
                 }
             }
         )
         return client
+    }
+}
+
+/// The answers a client's delegate gave to the server trust challenges that `StubProtocol` passed to it.
+private final class RecordedDispositions: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [URLSession.AuthChallengeDisposition] = []
+
+    var all: [URLSession.AuthChallengeDisposition] { lock.withLock { recorded } }
+
+    func append(_ disposition: URLSession.AuthChallengeDisposition) {
+        lock.withLock { recorded.append(disposition) }
     }
 }

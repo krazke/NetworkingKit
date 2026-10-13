@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 351 XCTest cases (Core 72, URLSession 138, WebSocket 5, Alamofire 136). All 351 passed on 2026-10-12 with Xcode 27.0 / Swift 6.4.
+The suite contains 357 XCTest cases (Core 72, URLSession 141, WebSocket 5, Alamofire 139). All 357 passed on 2026-10-13 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -282,7 +282,6 @@ An interceptor in `additionalInterceptors` that decides to retry runs before `Re
 | Transport failure, including `.secureConnectionFailed` | Yes | `nil`, also when an earlier attempt received a response | The `URLError`; the request fails with `.transport` wrapping it |
 | A pinned host's server trust is rejected | No; the request fails at once with `.transport` wrapping a `PinningError` (see [SSL pinning](#ssl-pinning)) | — | — |
 | The system rejects the certificate of a host without pinning | No; the request fails at once with `.transport` wrapping the `URLError` (see [SSL pinning](#ssl-pinning)) | — | — |
-| The Alamofire transport rejects the server trust of a host it has no evaluator for (`noRequiredEvaluator`, see [known issues](#status--known-issues)) | No; the request fails at once with `.transport` wrapping the `AFError` | — | — |
 | Any other failure after sending, which only the Alamofire transport produces | Yes | The attempt's response, if any | The `APIError` the request fails with |
 | 2xx response, also when its body cannot be decoded | No | — | — |
 | A response that is not an `HTTPURLResponse`, whatever its body | No | — | — |
@@ -331,7 +330,7 @@ do {
 }
 ```
 
-Match on the case rather than on the wrapped error. The `URLError`, `CocoaError` and `PinningError` values named above are the same in both transports. Otherwise the wrapped error of `.encoding`, `.decoding` and `.unknown` is an internal wrapper whose description includes the original error, and it differs between transports. Failures that only Alamofire produces become `.transport` with a wrapper around the `AFError`: a server trust rejected for a host without an evaluator (`noRequiredEvaluator`) and a GET request with a body.
+Match on the case rather than on the wrapped error. The `URLError`, `CocoaError` and `PinningError` values named above are the same in both transports. Otherwise the wrapped error of `.encoding`, `.decoding` and `.unknown` is an internal wrapper whose description includes the original error, and it differs between transports. A failure that only Alamofire produces, such as a GET request with a body, becomes `.transport` with a wrapper around the `AFError`.
 
 ## SSL pinning
 
@@ -351,6 +350,8 @@ Pinning adds to the system's trust evaluation; it does not replace it. For a pin
 
 - `NetworkingAlamofire` maps the policies onto `ServerTrustManager` with `PinnedCertificatesTrustEvaluator` / `PublicKeysTrustEvaluator` and their default settings (default and host validation on, self-signed certificates not accepted). A host whose list has no usable pin gets an evaluator that runs the system's evaluation and then rejects the trust.
 - `NetworkingURLSession` uses an internal `URLSessionDelegate` that calls `SecTrustEvaluateWithError` on the trust URLSession presents and then compares certificates or keys from the evaluated chain. Before 1.0.12 it skipped the evaluation, so a matching pin also accepted an expired certificate, a certificate for another host or an untrusted chain.
+
+**Hosts without pins.** A host that is not a key of `pinning`, or whose policy is `.none`, is not pinned, also while other hosts are: both transports leave its server trust challenge to URLSession's default handling, so the system evaluates the trust as it would without pinning. CDN hosts and redirect targets therefore work without being listed. A key is compared exactly with the host the challenge names, which URLSession lowercases, so write keys as lowercase host names without a scheme or port; any other key pins nothing (see [known issues](#status--known-issues)). Before 1.2.1 the Alamofire transport created its `ServerTrustManager` with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host was pinned, a request to every other host, including one with `.none`, failed at once with `.transport` wrapping the `AFError` `noRequiredEvaluator`.
 
 **When pinning rejects a host,** the request fails at once with `APIError.transport` wrapping a `PinningError`. Neither transport calls `retry` for it, because another attempt would get the same certificate. `PinningError.host` is the host whose trust was rejected, and `reason` says why:
 
@@ -375,7 +376,7 @@ do {
 
 Before 1.1.0 the URLSession transport threw `.cancelled` for a rejected pinned host, and the Alamofire transport retried it like a transport error, up to `limit` attempts, before it threw `.transport` wrapping the `AFError`.
 
-**When the system rejects an unpinned host's certificate,** the request also fails at once, without calling `retry`, but stays `.transport` with the `URLError` URLSession reports for the failed check (expiry, host name or chain to a trusted root): `.serverCertificateHasBadDate`, `.serverCertificateUntrusted`, `.serverCertificateHasUnknownRoot` or `.serverCertificateNotYetValid`. For a self-signed certificate URLSession reports `.serverCertificateUntrusted`, also when it has expired or is issued for another host. `.secureConnectionFailed` is still retried, because a TLS handshake can also fail for a transient reason, such as a connection reset during the handshake. Before 1.1.1 both transports retried every one of these codes like a network failure. In the Alamofire transport this applies to a host without an evaluator only while no host is pinned; otherwise the request fails with `noRequiredEvaluator` (see [known issues](#status--known-issues)).
+**When the system rejects an unpinned host's certificate,** the request also fails at once, without calling `retry`, but stays `.transport` with the `URLError` URLSession reports for the failed check (expiry, host name or chain to a trusted root): `.serverCertificateHasBadDate`, `.serverCertificateUntrusted`, `.serverCertificateHasUnknownRoot` or `.serverCertificateNotYetValid`. For a self-signed certificate URLSession reports `.serverCertificateUntrusted`, also when it has expired or is issued for another host. `.secureConnectionFailed` is still retried, because a TLS handshake can also fail for a transient reason, such as a connection reset during the handshake. Before 1.1.1 both transports retried every one of these codes like a network failure.
 
 Pinning applies to the HTTP clients only. `WebSocketConfiguration` has no pinning option. Both implementations have behavioral gaps listed under known issues.
 
@@ -549,10 +550,10 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 The package is a prototype. The issues below were confirmed by reading the code, some also by a throwaway test; none is covered by a test in the suite yet.
 
 **Alamofire transport**
-- `ServerTrustManager(evaluators:)` is created with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host is pinned, requests to every unlisted host fail (including CDN and redirect targets). Since 1.1.1 a host whose pin list is empty or unparsable counts as pinned too.
 - A non-2xx status outside 400–599, such as 300 or 304, fails with `.transport` wrapping the `AFError`, and `retry` gets that error, while the URLSession transport throws `.server` with the status and body. `AlamofireAPIClient.mapError` maps only `400..<600` to a status case. Confirmed by a throwaway test for 300 and 304.
 
 **Both transports**
+- `pinning` keys are neither normalized nor validated. Both transports compare a key exactly with the host the server trust challenge names, which URLSession lowercases: a throwaway request to `https://WWW.Example.COM/` got a challenge for `www.example.com`, while `URL.host` keeps the case. A key with an uppercase letter, a scheme or a port therefore matches no challenge, and its host is silently left unpinned; before 1.2.1 the Alamofire transport rejected such a host with `noRequiredEvaluator` by accident. By reading the code: for `.trustEvaluationFailed` and for a pin list without a usable pin, the Alamofire transport takes `PinningError.host` from the request URL, which keeps its case, while the URLSession transport reports the lowercased challenge host.
 - A failed client-certificate handshake is retried like any transport error. Only the four server trust codes listed under [SSL pinning](#ssl-pinning) skip `retry`, so `.clientCertificateRejected` (-1205) and `.clientCertificateRequired` (-1206) reach `RetryInterceptor`, which sends the request again for a method in `retryableMethods`, up to `limit` attempts. Neither transport answers a client-certificate challenge itself: URLSession, `PinningDelegate` and Alamofire's `SessionDelegate` give it default handling, so another attempt meets the same credentials and most likely fails the same way.
 
 **NetworkingCore**
