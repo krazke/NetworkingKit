@@ -2,9 +2,10 @@ import Foundation
 
 /// How a transport checks one host's server trust, as a value in `NetworkConfiguration.pinning`.
 ///
-/// The keys of `pinning` are compared exactly with the host the server trust challenge names, which URLSession
-/// lowercases. A host that is not a key, or whose policy is `.none`, gets the system's trust evaluation without
-/// pins in both transports, also while other hosts are pinned.
+/// The keys of `pinning` are host names or IP addresses. Both transports compare them with the host the server
+/// trust challenge names case-insensitively, ignoring one trailing dot, and an IPv6 address with or without
+/// brackets in any spelling. A host that is not a key, or whose policy is `.none`, gets the system's trust
+/// evaluation without pins in both transports, also while other hosts are pinned.
 public enum PinningPolicy: Sendable {
     /// No pinning: the system's trust evaluation only.
     case none

@@ -6,6 +6,12 @@ public struct NetworkConfiguration: @unchecked Sendable {
     public var sessionConfiguration: URLSessionConfiguration
     public var globalHeaders: [String: String]
     public var dynamicHeaders: HeadersProvider
+    /// Pins by host. A key is a host name or an IP address, without a scheme, port or path; an internationalized
+    /// name is written in punycode (`xn--…`). Keys are compared case-insensitively, ignoring one trailing dot.
+    ///
+    /// `URLSessionAPIClient(configuration:)` and the `AlamofireAPIClient` initializers that build their own
+    /// session stop the app with `preconditionFailure` when a key is not a host name or an IP address, or when
+    /// two keys name the same host with different policies. See `PinningPolicy`.
     public var pinning: [String: PinningPolicy]
     public var retry: RetryConfiguration
     public var tokenStore: any TokenStore

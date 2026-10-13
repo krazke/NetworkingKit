@@ -31,15 +31,41 @@ final class URLSessionPinningTLSTests: XCTestCase {
         try await assertRejected(presenting: LoopbackTLSServer.certificate, pin: .certificates([]))
     }
 
+    /// URLSession lowercases the host in the challenge, in the task's current request and in the error's failing
+    /// URL, so a host written with uppercase letters in the base URL is pinned and reported in lowercase.
+    func testUppercaseBaseURLHostIsPinned() async throws {
+        try await assertRejected(presenting: LoopbackTLSServer.certificate,
+                                 pin: .certificates([LoopbackTLSServer.certificate]),
+                                 baseURLHost: "LOCALHOST",
+                                 key: "localhost",
+                                 reportedHost: "localhost")
+    }
+
+    /// Before 1.3.0 a key with an uppercase letter matched no challenge, and the host was not pinned.
+    func testUppercaseKeyPinsHost() async throws {
+        try await assertRejected(presenting: LoopbackTLSServer.certificate,
+                                 pin: .certificates([LoopbackTLSServer.certificate]),
+                                 baseURLHost: "localhost",
+                                 key: "LocalHost",
+                                 reportedHost: "localhost")
+    }
+
+    /// Requests `baseURLHost`, which resolves to the server's address, with `pin` for `key`, and expects a
+    /// `.trustEvaluationFailed` rejection of `reportedHost`. `localhost` reaches the server, whose certificate is
+    /// issued for its IP address only, so the system rejects the trust for that name too.
     private func assertRejected(presenting certificate: Data, pin: PinningPolicy,
+                                baseURLHost: String = LoopbackTLSServer.host,
+                                key: String = LoopbackTLSServer.host,
+                                reportedHost: String = LoopbackTLSServer.host,
                                 file: StaticString = #filePath, line: UInt = #line) async throws {
         let server = try await LoopbackTLSServer(presenting: certificate)
         defer { server.stop() }
+        let baseURL = try XCTUnwrap(URL(string: "https://\(baseURLHost):\(try XCTUnwrap(server.baseURL.port))/"))
         let recorder = RecordingInterceptor()
         let client = URLSessionAPIClient(configuration: NetworkConfiguration(
-            baseURL: server.baseURL,
+            baseURL: baseURL,
             sessionConfiguration: .ephemeral,
-            pinning: [LoopbackTLSServer.host: pin],
+            pinning: [key: pin],
             retry: RetryConfiguration(limit: 3, baseDelay: 0.01, maxDelay: 0.01),
             additionalInterceptors: [recorder]
         ))
@@ -48,7 +74,7 @@ final class URLSessionPinningTLSTests: XCTestCase {
             try await client.sendVoid(GetEndpoint())
             XCTFail("Expected APIError.transport(PinningError)", file: file, line: line)
         } catch APIError.transport(let error as PinningError) {
-            XCTAssertEqual(error, PinningError(host: LoopbackTLSServer.host, reason: .trustEvaluationFailed),
+            XCTAssertEqual(error, PinningError(host: reportedHost, reason: .trustEvaluationFailed),
                            file: file, line: line)
         } catch {
             XCTFail("Expected APIError.transport(PinningError), got \(error)", file: file, line: line)

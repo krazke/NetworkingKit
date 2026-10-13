@@ -15,7 +15,8 @@ public struct PinningError: Error, Sendable, Equatable {
         case pinMismatch
     }
 
-    /// The host whose trust was rejected, as the server trust challenge names it.
+    /// The host whose trust was rejected, as the server trust challenge names it: in lowercase, an IPv6 address
+    /// without brackets, and with the trailing dot when the request URL has one.
     public let host: String
     public let reason: Reason
 

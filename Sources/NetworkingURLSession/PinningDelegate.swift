@@ -7,12 +7,14 @@ import NetworkingCore
 /// For a pinned host the system first evaluates the trust as URLSession presents it, so expiry, the host name
 /// and the chain to a trusted root are checked as with default handling; only then are the pins compared with
 /// the evaluated chain. A failure of either cancels the challenge, which fails the task with `URLError.cancelled`,
-/// and is recorded for `failure(forHost:)`. An unpinned host gets default handling.
+/// and is recorded for `failure(forHost:)`. An unpinned host gets default handling. The challenge's host is looked
+/// up in the canonical form of `PinnedHost`, so a URL with a trailing dot is pinned like the host without it.
 final class PinningDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let pinning: [String: PinningPolicy]
     private let lock = NSLock()
     private var failures: [String: PinningError] = [:]
 
+    /// - Parameter pinning: Policies keyed by host in the canonical form of `PinnedHost.canonicalKeys(_:)`.
     init(pinning: [String: PinningPolicy]) { self.pinning = pinning }
 
     func urlSession(_ session: URLSession,
@@ -26,7 +28,7 @@ final class PinningDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegat
 
         let host = challenge.protectionSpace.host
         let matchesPin: (SecTrust) -> Bool
-        switch pinning[host] ?? .none {
+        switch pinning[PinnedHost.canonical(host)] ?? .none {
         case .none:
             return completionHandler(.performDefaultHandling, nil)
         case .certificates(let pinned):

@@ -2,7 +2,7 @@
 
 A reusable Swift package for the networking layer of iOS apps. `NetworkingCore` holds transport-agnostic abstractions; `NetworkingAlamofire` and `NetworkingURLSession` are interchangeable transports; `NetworkingWebSocket` is a generic WebSocket client; `NetworkingTesting` provides test doubles.
 
-> **Status: prototype.** The design is stable and the test suite passes, but several defects in pinning, downloads and WebSocket reconnect make it unsuitable for production as-is. See [Status & known issues](#status--known-issues).
+> **Status: prototype.** The design is stable and the test suite passes, but several defects in downloads and WebSocket reconnect make it unsuitable for production as-is. See [Status & known issues](#status--known-issues).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -46,7 +46,7 @@ swift build
 swift test
 ```
 
-The suite contains 357 XCTest cases (Core 72, URLSession 141, WebSocket 5, Alamofire 139). All 357 passed on 2026-10-13 with Xcode 27.0 / Swift 6.4.
+The suite contains 381 XCTest cases (Core 84, URLSession 147, WebSocket 5, Alamofire 145). All 381 passed on 2026-10-13 with Xcode 27.0 / Swift 6.4.
 
 ## Adding the package
 
@@ -54,7 +54,7 @@ In the consumer's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/<your-org>/NetworkingKit.git", from: "1.2.0"),
+    .package(url: "https://github.com/<your-org>/NetworkingKit.git", from: "1.3.0"),
 ],
 targets: [
     .target(
@@ -80,6 +80,14 @@ targets: [
 ```
 
 The package is not published; the URL above is a placeholder. In Xcode, use **File → Add Package Dependencies…** and attach each library product to the target that needs it.
+
+## Upgrading from 1.2.x to 1.3.0
+
+1.3.0 changes how `NetworkConfiguration.pinning` keys are read. No signature changes, but a configuration that worked before can now stop the app when the client is created. Such a change would normally need a major release; it ships as a minor release because no app depends on the package yet.
+
+- Both transports compare a key with the host the server trust challenge names in a canonical form: case does not matter, one trailing dot is ignored, and an IPv6 address matches with or without brackets in any spelling. A key such as `"API.Example.com"` now pins its host; before, it pinned nothing, and the host got the system's trust evaluation only.
+- A request to a URL whose host ends with a dot, such as `https://api.example.com./`, is pinned like the host without the dot. Before, it got default handling, so it bypassed the host's pins.
+- `URLSessionAPIClient(configuration:)`, `AlamofireAPIClient(configuration:)` and `AlamofireAPIClient(configuration:additionalMonitors:)` stop the app with `preconditionFailure` when a key is not a host name or an IP address, or when two keys name the same host with different policies. Write such a key as the bare host: `"https://api.example.com:443"` becomes `"api.example.com"`, and `"bücher.example"` becomes its punycode form `"xn--bcher-kva.example"`. Pins apply to a host on every port. See [SSL pinning](#ssl-pinning) for the rules.
 
 ## Upgrading from 1.1.x to 1.2.0
 
@@ -351,9 +359,11 @@ Pinning adds to the system's trust evaluation; it does not replace it. For a pin
 - `NetworkingAlamofire` maps the policies onto `ServerTrustManager` with `PinnedCertificatesTrustEvaluator` / `PublicKeysTrustEvaluator` and their default settings (default and host validation on, self-signed certificates not accepted). A host whose list has no usable pin gets an evaluator that runs the system's evaluation and then rejects the trust.
 - `NetworkingURLSession` uses an internal `URLSessionDelegate` that calls `SecTrustEvaluateWithError` on the trust URLSession presents and then compares certificates or keys from the evaluated chain. Before 1.0.12 it skipped the evaluation, so a matching pin also accepted an expired certificate, a certificate for another host or an untrusted chain.
 
-**Hosts without pins.** A host that is not a key of `pinning`, or whose policy is `.none`, is not pinned, also while other hosts are: both transports leave its server trust challenge to URLSession's default handling, so the system evaluates the trust as it would without pinning. CDN hosts and redirect targets therefore work without being listed. A key is compared exactly with the host the challenge names, which URLSession lowercases, so write keys as lowercase host names without a scheme or port; any other key pins nothing (see [known issues](#status--known-issues)). Before 1.2.1 the Alamofire transport created its `ServerTrustManager` with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host was pinned, a request to every other host, including one with `.none`, failed at once with `.transport` wrapping the `AFError` `noRequiredEvaluator`.
+**Hosts without pins.** A host that is not a key of `pinning`, or whose policy is `.none`, is not pinned, also while other hosts are: both transports leave its server trust challenge to URLSession's default handling, so the system evaluates the trust as it would without pinning. CDN hosts and redirect targets therefore work without being listed. Before 1.2.1 the Alamofire transport created its `ServerTrustManager` with Alamofire's default `allHostsMustBeEvaluated: true`, so once any host was pinned, a request to every other host, including one with `.none`, failed at once with `.transport` wrapping the `AFError` `noRequiredEvaluator`.
 
-**When pinning rejects a host,** the request fails at once with `APIError.transport` wrapping a `PinningError`. Neither transport calls `retry` for it, because another attempt would get the same certificate. `PinningError.host` is the host whose trust was rejected, and `reason` says why:
+**Keys.** A key is a host name or an IP address, without a scheme, port or path; pins apply to the host on every port. Both transports compare a key with the host the server trust challenge names in a canonical form: case does not matter, one trailing dot is ignored on either side, and an IPv6 address matches with or without brackets in any spelling. A request to `https://api.example.com./` is therefore pinned by the key `api.example.com`, as the system trusts the host's certificate under both names. Write an internationalized name in punycode (`xn--…`), the form in which URLSession names it. When the client is created, it stops the app with `preconditionFailure` if a key is not a host name or an IP address (it has a scheme, port, path, query, fragment, user info, wildcard, whitespace or empty label, or is not ASCII) or if two keys name the same host with different policies: such a key would leave the host it was meant for unpinned, and of two conflicting keys the dictionary's order would pick one. `AlamofireAPIClient(session:configuration:)` does not read `pinning`. Before 1.3.0 a key was compared exactly, so a key with an uppercase letter, a scheme or a port silently pinned nothing, and a URL whose host ended with a dot bypassed the host's pins.
+
+**When pinning rejects a host,** the request fails at once with `APIError.transport` wrapping a `PinningError`. Neither transport calls `retry` for it, because another attempt would get the same certificate. `PinningError.host` is the host whose trust was rejected, as the challenge names it: in lowercase, an IPv6 address without brackets, and with the trailing dot when the URL has one. `reason` says why:
 
 - `.trustEvaluationFailed`: the system rejected the certificate before the pins were compared, for example because it has expired, is issued for another host or does not chain to a trusted root.
 - `.pinMismatch`: the system trusts the chain, but no certificate or key in it matches a pin.
@@ -550,10 +560,10 @@ An incremental migration keeps Moya and NetworkingKit side by side behind the ap
 The package is a prototype. The issues below were confirmed by reading the code, some also by a throwaway test; none is covered by a test in the suite yet.
 
 **Alamofire transport**
+- `AlamofireAPIClient(session:configuration:)` uses the given `Session` as it is and reads only `baseURL`, `decoderFactory` and `encoderFactory` from the configuration. `pinning`, `sessionConfiguration`, the headers, `refreshAction`, `retry`, `additionalInterceptors` and `logger` are silently not applied, and neither the initializer's comment nor this README says so. Confirmed by reading `AlamofireAPIClient.swift`: only `buildSession`, which the other initializers call, reads those fields.
 - A non-2xx status outside 400–599, such as 300 or 304, fails with `.transport` wrapping the `AFError`, and `retry` gets that error, while the URLSession transport throws `.server` with the status and body. `AlamofireAPIClient.mapError` maps only `400..<600` to a status case. Confirmed by a throwaway test for 300 and 304.
 
 **Both transports**
-- `pinning` keys are neither normalized nor validated. Both transports compare a key exactly with the host the server trust challenge names, which URLSession lowercases: a throwaway request to `https://WWW.Example.COM/` got a challenge for `www.example.com`, while `URL.host` keeps the case. A key with an uppercase letter, a scheme or a port therefore matches no challenge, and its host is silently left unpinned; before 1.2.1 the Alamofire transport rejected such a host with `noRequiredEvaluator` by accident. By reading the code: for `.trustEvaluationFailed` and for a pin list without a usable pin, the Alamofire transport takes `PinningError.host` from the request URL, which keeps its case, while the URLSession transport reports the lowercased challenge host.
 - A failed client-certificate handshake is retried like any transport error. Only the four server trust codes listed under [SSL pinning](#ssl-pinning) skip `retry`, so `.clientCertificateRejected` (-1205) and `.clientCertificateRequired` (-1206) reach `RetryInterceptor`, which sends the request again for a method in `retryableMethods`, up to `limit` attempts. Neither transport answers a client-certificate challenge itself: URLSession, `PinningDelegate` and Alamofire's `SessionDelegate` give it default handling, so another attempt meets the same credentials and most likely fails the same way.
 
 **NetworkingCore**
@@ -570,6 +580,7 @@ The package is a prototype. The issues below were confirmed by reading the code,
 - There is no pinning and no test for `WebSocketClient` itself; only `ReconnectPolicy` is tested.
 
 **Missing**
+- A `StubProtocol` test of a base URL whose host has uppercase letters. URLSession lowercases the host in the server trust challenge, the task's current request and the error's failing URL, but `StubProtocol` passes the challenger the request URL as written. The pinning tests therefore cover an uppercase base URL host only over `LoopbackTLSServer` (`*PinningTLSTests`).
 - A pinning test over a TLS connection whose chain the system trusts. The TLS tests connect to `LoopbackTLSServer`, whose self-signed certificate the system rejects, so they reach only a failed trust evaluation. A pin mismatch and an accepted pin are covered with `StubProtocol`, which passes each request's challenge to the client's delegate itself: URLSession answers a challenge raised by a `URLProtocol` with default handling and never passes it to the session's delegate.
 - Tests for cancelling a multipart `upload` or a `download` while the request is in flight.
 - An end-to-end test of upload progress. URLSession does not call `didSendBodyData` for a request served by a `URLProtocol`, so the progress tests have `StubProtocol` call the task's delegate (URLSession transport) or `Session.delegate` (Alamofire transport) instead; they do not cover the callbacks URLSession makes over a real connection, or the queue the handler runs on.

@@ -16,10 +16,14 @@ enum ServerTrustFactory {
     /// `SessionDelegate` gives its challenge default handling, as `PinningDelegate` does. Alamofire's default,
     /// `allHostsMustBeEvaluated: true`, would fail such a host with `noRequiredEvaluator` once any host is pinned,
     /// including CDN hosts and redirect targets.
+    ///
+    /// The keys and the challenge's host are compared in the canonical form of `PinnedHost`, as in
+    /// `PinningDelegate`. A key that names no host stops the app rather than leaving the host it was meant for
+    /// unpinned.
     static func makeManager(_ pinning: [String: PinningPolicy]) -> ServerTrustManager? {
         var evaluators: [String: ServerTrustEvaluating] = [:]
 
-        for (host, policy) in pinning {
+        for (host, policy) in PinnedHost.requireCanonicalKeys(pinning) {
             switch policy {
             case .none:
                 continue
@@ -40,7 +44,8 @@ enum ServerTrustFactory {
             }
         }
 
-        return evaluators.isEmpty ? nil : ServerTrustManager(allHostsMustBeEvaluated: false, evaluators: evaluators)
+        return evaluators.isEmpty ? nil : CanonicalHostTrustManager(allHostsMustBeEvaluated: false,
+                                                                    evaluators: evaluators)
     }
 
     /// Rejects every trust: the system's evaluation first, then `noCertificatesFound`, which
@@ -49,5 +54,15 @@ enum ServerTrustFactory {
     private static func unmatchableEvaluator() -> ServerTrustEvaluating {
         CompositeTrustEvaluator(evaluators: [DefaultTrustEvaluator(),
                                              PinnedCertificatesTrustEvaluator(certificates: [])])
+    }
+}
+
+/// Looks up the evaluator for the canonical form of the challenge's host. `ServerTrustManager` compares the host
+/// exactly, so a URL with a trailing dot would get no evaluator and default handling.
+///
+/// The evaluator still gets the host as the challenge names it, for its host validation and for the error.
+private final class CanonicalHostTrustManager: ServerTrustManager, @unchecked Sendable {
+    override func serverTrustEvaluator(forHost host: String) throws -> (any ServerTrustEvaluating)? {
+        try super.serverTrustEvaluator(forHost: PinnedHost.canonical(host))
     }
 }

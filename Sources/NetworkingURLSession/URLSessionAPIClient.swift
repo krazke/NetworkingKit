@@ -12,9 +12,11 @@ public final class URLSessionAPIClient: APIClientProtocol {
     public init(configuration: NetworkConfiguration) {
         self.configuration = configuration
 
-        let pinning = configuration.pinning.contains(where: { _, p in
+        // Stops the app on a key that names no host, rather than leaving the host it was meant for unpinned.
+        let pinnedHosts = PinnedHost.requireCanonicalKeys(configuration.pinning)
+        let pinning = pinnedHosts.contains(where: { _, p in
             if case .none = p { return false } else { return true }
-        }) ? PinningDelegate(pinning: configuration.pinning) : nil
+        }) ? PinningDelegate(pinning: pinnedHosts) : nil
         self.pinningDelegate = pinning
 
         let queue = OperationQueue()

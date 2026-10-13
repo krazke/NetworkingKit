@@ -88,6 +88,44 @@ final class AlamofirePinningFailureTests: XCTestCase {
         }
     }
 
+    // MARK: - Key and host forms
+
+    /// URLSession lowercases the host it names in the challenge, so a key is compared in canonical form.
+    func testUppercaseKeyPinsHost() async throws {
+        try await assertRejected(key: "PINNED.Test",
+                                 presenting: PinningFixtures.leaf,
+                                 pin: .certificates([PinningFixtures.unrelated]),
+                                 as: .pinMismatch)
+    }
+
+    /// The challenge names a host with a trailing dot with the dot, and the system trusts a certificate for the
+    /// host without it; before 1.3.0 such a request was not pinned.
+    func testKeyPinsHostWithTrailingDot() async throws {
+        try await assertRejected(host: "\(PinningFixtures.host).",
+                                 key: PinningFixtures.host,
+                                 presenting: PinningFixtures.leaf,
+                                 pin: .certificates([PinningFixtures.unrelated]),
+                                 as: .pinMismatch)
+    }
+
+    func testKeyWithTrailingDotPinsHost() async throws {
+        try await assertRejected(key: "\(PinningFixtures.host).",
+                                 presenting: PinningFixtures.leaf,
+                                 pin: .certificates([PinningFixtures.unrelated]),
+                                 as: .pinMismatch)
+    }
+
+    /// The challenge names an IPv6 address without brackets. `leaf` is not issued for it, so the system rejects
+    /// the trust; a host left unpinned would get default handling, which the stub answers with 200.
+    func testBracketedIPv6KeyPinsAddress() async throws {
+        try await assertRejected(host: "[::1]",
+                                 key: "[0:0:0:0:0:0:0:1]",
+                                 reportedHost: "::1",
+                                 presenting: PinningFixtures.leaf,
+                                 pin: .certificates([PinningFixtures.leaf]),
+                                 as: .trustEvaluationFailed)
+    }
+
     // MARK: - Pin list without a usable pin
 
     /// No pin can match an empty list, so the host is rejected rather than left unpinned.
@@ -182,7 +220,11 @@ final class AlamofirePinningFailureTests: XCTestCase {
         XCTAssertEqual(StubProtocol.recordedRequests.count, 1, file: file, line: line)
     }
 
+    /// Requests `https://<host>/` with `pin` for `key`, or for `host` when `key` is `nil`, and expects a
+    /// `PinningError` for `reportedHost`, or for `host` when it is `nil`.
     private func assertRejected(host: String = PinningFixtures.host,
+                                key: String? = nil,
+                                reportedHost: String? = nil,
                                 presenting certificate: Data,
                                 anchored: Bool = true,
                                 pin: PinningPolicy,
@@ -192,14 +234,15 @@ final class AlamofirePinningFailureTests: XCTestCase {
                                     try await $0.sendVoid(GetEndpoint())
                                 }) async throws {
         let recorder = RecordingInterceptor()
-        let client = makeClient(host: host, pinning: [host: pin], presenting: certificate, anchored: anchored,
+        let client = makeClient(host: host, pinning: [key ?? host: pin], presenting: certificate, anchored: anchored,
                                 recorder: recorder)
 
         do {
             try await request(client)
             XCTFail("Expected APIError.transport(PinningError)", file: file, line: line)
         } catch APIError.transport(let error as PinningError) {
-            XCTAssertEqual(error, PinningError(host: host, reason: reason), file: file, line: line)
+            XCTAssertEqual(error, PinningError(host: reportedHost ?? host, reason: reason),
+                           file: file, line: line)
         } catch {
             XCTFail("Expected APIError.transport(PinningError), got \(error)", file: file, line: line)
         }
